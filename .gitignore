@@ -1,0 +1,33 @@
+# Ambiente
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+src/*.egg-info/
+dist/
+build/
+
+# Configuração e dados locais (não versionar dados reais)
+config.json
+secrets.local.json
+*.local.json
+.env
+data/*.xlsx
+!data/planilha_exemplo.xlsx
+data/progress.db
+data/*.db
+browser_profile/
+browser_profile_*/
+capturas/
+*.log
+
+# IDE / SO
+.idea/
+.vscode/
+.cursor/
+*.swp
+Thumbs.db
+.DS_Store

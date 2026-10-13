@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apac-bot"
+version = "0.1.0"
+description = "Automação local Windows para consulta de origem e lançamento APAC"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "playwright>=1.40.0",
+  "PyAutoGUI>=0.9.54",
+  "openpyxl>=3.1.2",
+  "pygetwindow>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+apac-bot = "apac_bot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

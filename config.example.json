@@ -1,0 +1,104 @@
+{
+  "clinica_id": "clinica_exemplo",
+  "sistema_origem": "mock",
+  "biodata": {
+    "url": "https://exemplo.biodata.local/login",
+    "user_data_dir": "browser_profile",
+    "secrets_file": "secrets.local.json",
+    "login": {
+      "locators": {
+        "campo_usuario": "#inputUsuario",
+        "campo_senha": "input[name='password']",
+        "botao_entrar": "button[type='submit']",
+        "indicador_logado": "text=Usuário:",
+        "url_apos_login": ["**/home*", "**/consultorio/**"]
+      }
+    },
+    "reauth": {
+      "titulo": "Autenticação",
+      "campo_senha": "input[type='password'], input[name='password']",
+      "botao_login": "button:has-text('Login')"
+    },
+    "navegacao": {
+      "modulo_atendimento": "#menuLateral [aria-label=\"Atendimento\"] button",
+      "campo_busca_menu": "input[placeholder=\"Pesquisar tela...\"]",
+      "item_cadastro_pacientes": "button:has-text(\"Cadastro de Pacientes\")"
+    },
+    "locators": {
+      "botao_pesquisar": "button.buttoncomponent_buttonComponent__eEVW3:has-text('Pesquisar')",
+      "campo_busca_nome": "#clienteCadastroId-ts-control",
+      "campo_busca_id": null,
+      "opcao_resultado": ".ts-dropdown .option, .ts-dropdown [data-selectable]",
+      "botao_confirmar_pesquisa": "button:has-text('Confirmar')",
+      "lista_resultados": ".ts-dropdown",
+      "resultado_item": ".ts-dropdown .option",
+      "campo_id_paciente": "input[name='clienteId']",
+      "campo_cpf": "#cpfCadastroClienteId",
+      "campo_cns": "input[name='cns']",
+      "campo_nome": "input[name='nome']",
+      "campo_nome_mae": "input[name='mae']",
+      "campo_nascimento": "#nascimentoCadastroId",
+      "campo_sexo": "select[name='sexo'], input[name='sexo'], #sexoCadastroId",
+      "campo_endereco": "input[name='endereco']"
+    }
+  },
+  "planilha": {
+    "caminho": "data/planilha_exemplo.xlsx",
+    "aba": "Lançamentos",
+    "linha_cabecalho": 1,
+    "apenas_ativos": true,
+    "colunas": {
+      "PACIENTE": "PACIENTE",
+      "COD": "COD.",
+      "AUDITOR": "AUDITOR",
+      "NUMERACAO": "NUMERAÇÃO",
+      "QUANT": "QUANT.",
+      "ID_PACIENTE": "ID_PACIENTE"
+    }
+  },
+  "normalizacao": {
+    "numeracao": {
+      "hifen_para_barra": true,
+      "preservar_original": true
+    },
+    "codigo": {
+      "preencher_zeros_esquerda": null,
+      "preservar_original": true
+    }
+  },
+  "dados_fixos": {
+    "cnes_solicitante": "6618839",
+    "cnes_executante": "6618839",
+    "tipo_apac": "3"
+  },
+  "apac": {
+    "titulo_janela": "APAC MAGNETICO",
+    "caminho_exe": "C:\\APAC\\APAC.exe",
+    "timeout_abrir_s": 30,
+    "permitir_salvar": false,
+    "passos_minimos_para_live": [
+      "foco_janela",
+      "inserir",
+      "numero_apac",
+      "cpf",
+      "enter_apos_cpf"
+    ],
+    "usar_navegacao_inicial": true,
+    "confirmar_navegacao_inicial": false,
+    "intervalo_enter_navegacao_s": 2.0,
+    "paciente_inicio": "ELMO CASTELO BRANCO DE LEMOS",
+    "passos": []
+  },
+  "timeouts": {
+    "biodata_ms": 15000,
+    "apac_pause_s": 0.5,
+    "confirmacao_operador_s": 120
+  },
+  "progresso": {
+    "caminho_db": "data/progress.db"
+  },
+  "diagnostico": {
+    "capturar_tela": false,
+    "pasta_capturas": "capturas"
+  }
+}
