@@ -87,7 +87,8 @@
     "usar_conhost": true,
     "reiniciar_se_ja_aberto": true,
     "confirmar_navegacao_inicial": false,
-    "intervalo_enter_navegacao_s": 2.0,
+    "velocidade": "rapido",
+    "intervalo_enter_navegacao_s": 0.8,
     "paciente_inicio": "ELMO CASTELO BRANCO DE LEMOS",
     "passos": []
   },

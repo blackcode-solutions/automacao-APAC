@@ -71,7 +71,8 @@ Edite `config.json`:
 | `apac.usar_conhost` | `true` (padrão) = abre o APAC no console clássico para ler o buffer da tela |
 | `apac.reiniciar_se_ja_aberto` | `true` (padrão) = no `open-apac`/`dump-apac-screen`, encerra APAC já aberto e reabre limpo no MENU |
 | `apac.confirmar_navegacao_inicial` | `false` = passos mapeados no `open-apac` rodam sem `s`; `true` = pede `s` em cada um. Passos **novos** sempre pedem `s` |
-| `apac.intervalo_enter_navegacao_s` | Pausa entre o 1º e o 2º Enter |
+| `apac.velocidade` | `seguro` (padrão no código) ou `rapido` — pausas menores; o gate por rótulo continua. Se falhar timing, volte para `seguro` |
+| `apac.intervalo_enter_navegacao_s` | Pausa entre Enters do menu; se omitido, usa 2.0 (`seguro`) ou 0.8 (`rapido`) |
 | `apac.paciente_inicio` | Nome do 1º paciente no `open-apac` (NUMERO) |
 | `apac.passos` | Teclas por paciente — vazia bloqueia `--live` |
 | `apac.caminho_exe` | Caminho do `APAC.exe` (padrão `C:\APAC\APAC.exe`) |

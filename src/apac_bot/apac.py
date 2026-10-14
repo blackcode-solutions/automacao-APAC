@@ -20,11 +20,78 @@ from apac_bot.console_screen import (
     TelaApac,
     campo_compativel,
     classificar_tela,
+    extrair_valor_campo_linha,
     identificar_campo_cursor,
     ler_buffer_apac,
     ler_valor_campo_cursor,
     preview_tela,
 )
+
+# Pausas do open-apac — perfil via apac.velocidade (seguro|rapido)
+_TIMINGS_SEGURO: dict[str, float] = {
+    "pre_campo": 1.0,
+    "pos_digitar": 0.6,
+    "pos_digitar_cnes": 1.2,
+    "pos_digitar_curto": 0.5,
+    "pos_tab": 0.85,
+    "pos_tab_apos_aceitar": 0.9,
+    "pos_sem_tab": 0.45,
+    "pos_enter_form": 1.0,
+    "enter_solto_timeout": 2.0,
+    "enter_solto_timeout_curto": 1.0,
+    "enter_solto_settle": 0.18,
+    "enter_solto_tail": 0.2,
+    "nav_enter": 2.0,
+    "pos_home": 0.1,
+    "pos_apos_digitar_numero": 0.35,
+    "pos_prontuario": 0.8,
+    "pos_raca_pre": 0.6,
+    "pos_raca_digitar": 0.5,
+    "pos_insert": 1.0,
+    "pos_tecla_foco": 0.12,
+    "pos_nav_retry": 1.8,
+    "pos_apos_ensure": 1.0,
+}
+_TIMINGS_RAPIDO: dict[str, float] = {
+    "pre_campo": 0.25,
+    "pos_digitar": 0.35,
+    "pos_digitar_cnes": 0.35,
+    "pos_digitar_curto": 0.25,
+    "pos_tab": 0.35,
+    "pos_tab_apos_aceitar": 0.35,
+    "pos_sem_tab": 0.2,
+    "pos_enter_form": 0.45,
+    "enter_solto_timeout": 0.35,
+    "enter_solto_timeout_curto": 0.35,
+    "enter_solto_settle": 0.05,
+    "enter_solto_tail": 0.05,
+    "nav_enter": 0.8,
+    "pos_home": 0.05,
+    "pos_apos_digitar_numero": 0.15,
+    "pos_prontuario": 0.35,
+    "pos_raca_pre": 0.25,
+    "pos_raca_digitar": 0.25,
+    "pos_insert": 0.45,
+    "pos_tecla_foco": 0.06,
+    "pos_nav_retry": 0.6,
+    "pos_apos_ensure": 0.4,
+}
+_timings_ativos: dict[str, float] = dict(_TIMINGS_SEGURO)
+
+
+def aplicar_velocidade_apac(perfil: str) -> str:
+    """Ativa tabela de pausas. Retorna nome normalizado (seguro|rapido)."""
+    global _timings_ativos
+    nome = (perfil or "seguro").strip().lower()
+    if nome in {"rapido", "rápido", "fast", "quick"}:
+        _timings_ativos = dict(_TIMINGS_RAPIDO)
+        return "rapido"
+    _timings_ativos = dict(_TIMINGS_SEGURO)
+    return "seguro"
+
+
+def timing_apac(chave: str, default: float = 0.0) -> float:
+    return float(_timings_ativos.get(chave, default))
 
 # Rotulos usados em _aceitar_campo_texto_se_preenchido / Tabs cegos
 _ROTULO_PARA_CAMPO: dict[str, CampoApac] = {
@@ -304,21 +371,26 @@ def _lparam_tecla(scan: int, *, key_up: bool) -> int:
     return base
 
 
-def aguardar_enter_solto(timeout_s: float = 2.0) -> None:
+def aguardar_enter_solto(timeout_s: float | None = None) -> None:
     """
     Espera o Enter do input() no terminal ser solto antes de focar o APAC.
     Sem isso, o keyup/Enter vaza e pula campos (ex.: CNES SOLICITANTE).
+    Timeouts/settles vêm do perfil apac.velocidade quando omitidos.
     """
+    if timeout_s is None:
+        timeout_s = timing_apac("enter_solto_timeout", 2.0)
+    settle = timing_apac("enter_solto_settle", 0.18)
+    tail = timing_apac("enter_solto_tail", 0.2)
     user32 = ctypes.windll.user32
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         pressed = bool(user32.GetAsyncKeyState(VK_RETURN) & 0x8000)
         if not pressed:
-            time.sleep(0.18)
+            time.sleep(settle)
             if not bool(user32.GetAsyncKeyState(VK_RETURN) & 0x8000):
                 return
-        time.sleep(0.04)
-    time.sleep(0.2)
+        time.sleep(min(0.04, settle))
+    time.sleep(tail)
 
 
 def enviar_tecla_hwnd(hwnd: int, vk: int, scan: int, *, nome: str = "tecla") -> None:
@@ -331,7 +403,7 @@ def enviar_tecla_hwnd(hwnd: int, vk: int, scan: int, *, nome: str = "tecla") -> 
     user32 = ctypes.windll.user32
     aguardar_enter_solto()
     ativar_hwnd(hwnd)
-    time.sleep(0.12)
+    time.sleep(timing_apac("pos_tecla_foco", 0.12))
     fg = user32.GetForegroundWindow()
     if fg == hwnd:
         user32.keybd_event(vk, scan, 0, 0)
@@ -355,32 +427,33 @@ def enviar_enter_hwnd(hwnd: int) -> None:
     if espera > 0:
         time.sleep(espera)
     # Garante que nenhum Enter do terminal ainda está pressionado
-    aguardar_enter_solto(timeout_s=1.0)
+    curto = timing_apac("enter_solto_timeout_curto", 1.0)
+    aguardar_enter_solto(timeout_s=curto)
     enviar_tecla_hwnd(hwnd, VK_RETURN, _SCAN_ENTER, nome="Enter")
     _LAST_ENTER_MONO = time.monotonic()
     # Espera o keyup assentar — reduz Enter vazado logo após o envio
-    time.sleep(0.2)
-    aguardar_enter_solto(timeout_s=0.8)
+    time.sleep(timing_apac("enter_solto_tail", 0.2))
+    aguardar_enter_solto(timeout_s=curto)
 
 
 def enviar_tab_hwnd(hwnd: int) -> None:
     """Envia Tab para a janela do APAC (avança campo sem validar tela)."""
-    aguardar_enter_solto(timeout_s=1.0)
+    aguardar_enter_solto(timeout_s=timing_apac("enter_solto_timeout_curto", 1.0))
     enviar_tecla_hwnd(hwnd, VK_TAB, _SCAN_TAB, nome="Tab")
-    time.sleep(0.15)
+    time.sleep(timing_apac("pos_home", 0.1))
 
 
 def enviar_shift_tab_hwnd(hwnd: int) -> None:
     """Envia Shift+Tab (volta um campo) com foco no APAC."""
     user32 = ctypes.windll.user32
-    aguardar_enter_solto(timeout_s=1.0)
+    aguardar_enter_solto(timeout_s=timing_apac("enter_solto_timeout_curto", 1.0))
     ativar_hwnd(hwnd)
-    time.sleep(0.1)
+    time.sleep(timing_apac("pos_home", 0.1))
     user32.keybd_event(VK_SHIFT, 0, 0, 0)
     time.sleep(0.02)
     enviar_tecla_hwnd(hwnd, VK_TAB, _SCAN_TAB, nome="Shift+Tab")
     user32.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
-    time.sleep(0.2)
+    time.sleep(timing_apac("enter_solto_tail", 0.2))
 
 
 def _texto_parece_municipio_ibge(texto: str) -> bool:
@@ -757,6 +830,10 @@ class ApacAutomator:
         self.cfg = cfg
         self.dry_run = dry_run
         self.confirm_fn = confirm_fn or _confirm_terminal
+        self._velocidade = aplicar_velocidade_apac(
+            str(cfg.apac.get("velocidade") or "seguro")
+        )
+        log.info("APAC velocidade=%s", self._velocidade)
         self._pyautogui = None
         self._ensure_feito = False
         self._nav_inicial_feita = False
@@ -1022,6 +1099,16 @@ class ApacAutomator:
         alvo = hwnd or self._hwnd_apac_ativo()
         enviar_texto_hwnd(alvo, texto)
 
+    def _pausa(self, chave: str) -> None:
+        """Sleep conforme apac.velocidade (seguro|rapido)."""
+        time.sleep(timing_apac(chave))
+
+    def _intervalo_nav_enter(self) -> float:
+        """Pausa entre Enters da navegacao MENU → lista."""
+        if "intervalo_enter_navegacao_s" in self.cfg.apac:
+            return float(self.cfg.apac.get("intervalo_enter_navegacao_s") or 2.0)
+        return timing_apac("nav_enter", 2.0)
+
     def _confirmar_nav(self) -> bool:
         """
         Confirmacao dos passos JA mapeados no open-apac.
@@ -1211,11 +1298,11 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("Digitando NUMERO %s (%s)", numero, lanc.paciente_nome)
         self._digitar_texto(numero, hwnd)
-        time.sleep(0.35)
+        self._pausa("pos_apos_digitar_numero")
         # Enter imediato apos digitar (sem 2o s) — evita Enter manual no meio e campo pulado
         log.info("Enter apos NUMERO — abre formulario (foco APAC ANTERIOR)")
         self._enviar_enter(hwnd)
-        time.sleep(1.0)
+        self._pausa("pos_enter_form")
 
         self._numero_preenchido = True
         log.info(
@@ -1267,7 +1354,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("1/2 Digitando CNES SOLICITANTE %s (sem Enter)", cnes_sol)
         self._digitar_texto(cnes_sol, hwnd)
-        time.sleep(1.2)
+        self._pausa("pos_digitar_cnes")
 
         # 2) CNES EXECUTANTE
         if confirmar:
@@ -1281,7 +1368,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("2/2 Digitando CNES EXECUTANTE %s (sem Enter)", cnes_exec)
         self._digitar_texto(cnes_exec, hwnd)
-        time.sleep(0.5)
+        self._pausa("pos_digitar_curto")
 
         self._cnes_preenchido = True
         log.info(
@@ -1325,7 +1412,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("1/2 Digitando INICIO DA VALIDADE %s (sem Enter)", inicio)
         self._digitar_texto(inicio, hwnd)
-        time.sleep(1.0)
+        self._pausa("pos_enter_form")
 
         if confirmar:
             ok = self.confirm_fn(
@@ -1338,7 +1425,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("2/2 Digitando FIM DA VALIDADE %s (sem Enter)", fim)
         self._digitar_texto(fim, hwnd)
-        time.sleep(0.5)
+        self._pausa("pos_digitar_curto")
 
         self._validade_preenchida = True
         log.info(
@@ -1383,7 +1470,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("1/2 Digitando TIPO DE APAC %s (sem Enter)", tipo)
         self._digitar_texto(tipo, hwnd)
-        time.sleep(1.0)
+        self._pausa("pos_enter_form")
 
         if confirmar:
             ok = self.confirm_fn(
@@ -1396,7 +1483,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("2/2 Enter — NACIONALIDADE (pula)")
         self._enviar_enter(hwnd)
-        time.sleep(0.5)
+        self._pausa("pos_digitar_curto")
 
         self._tipo_nacionalidade_feito = True
         log.info(
@@ -1431,7 +1518,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("1/2 Enter — No. PRONTUARIO (pula)")
         self._enviar_enter(hwnd)
-        time.sleep(0.8)
+        self._pausa("pos_prontuario")
 
         if confirmar:
             ok = self.confirm_fn(
@@ -1444,7 +1531,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("2/2 Digitando SEM CPF = n (sem Enter)")
         self._digitar_texto("n", hwnd)
-        time.sleep(0.5)
+        self._pausa("pos_digitar_curto")
 
         self._prontuario_sem_cpf_feito = True
         log.info("PRONTUARIO + SEM CPF=n ok — proximo: CPF via BIODATA.")
@@ -1477,7 +1564,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("Digitando CPF no APAC (%s digitos, sem Enter)", len(cpf_digitos))
         self._digitar_texto(cpf_digitos, hwnd)
-        time.sleep(0.5)
+        self._pausa("pos_digitar_curto")
 
         self._cpf_preenchido = True
         log.info("CPF digitado no APAC — proximo: SITUACAO DE RUA = n.")
@@ -1503,12 +1590,12 @@ class ApacAutomator:
                 raise ApacBlockedError("operador recusou digitar n em SITUACAO DE RUA")
 
         # Pausa: APAC termina de avancar do CPF para SITUACAO DE RUA
-        time.sleep(0.6)
+        self._pausa("pos_raca_pre")
         aguardar_enter_solto()
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("Digitando SITUACAO DE RUA = n (sem Enter)")
         self._digitar_texto("n", hwnd)
-        time.sleep(0.5)
+        self._pausa("pos_digitar_curto")
 
         self._situacao_rua_feita = True
         log.info("SITUACAO DE RUA=n ok — proximo: verificar NOME (clipboard).")
@@ -1554,19 +1641,22 @@ class ApacAutomator:
             if not ok:
                 raise ApacBlockedError(f"operador recusou verificar {rotulo} no APAC")
 
-        time.sleep(1.0)
+        self._pausa("pre_campo")
         aguardar_enter_solto()
         campo_esp = _ROTULO_PARA_CAMPO.get(rotulo.upper())
-        if campo_esp is not None:
-            self.exigir_campo(campo_esp, passo=rotulo)
-        else:
-            self.exigir_tela(TelaApac.IDENTIFICACAO, passo=rotulo)
         hwnd = self._ativar_janela_apac(clicar_centro=False)
-        # Preferir buffer no cursor — Home/Shift+End do clipboard adianta o foco
-        # e o Tab seguinte pula para PROCEDIMENTOS.
+        # Preferir buffer no cursor — um read (gate + valor); clipboard so se falhar.
         texto = ""
+        bruto = ""
         try:
-            bruto = (ler_valor_campo_cursor(self._pids_apac()) or "").strip()
+            if campo_esp is not None:
+                linha_gate = self.exigir_campo(campo_esp, passo=rotulo)
+                bruto = (
+                    extrair_valor_campo_linha(linha_gate, campo=campo_esp) or ""
+                ).strip()
+            else:
+                self.exigir_tela(TelaApac.IDENTIFICACAO, passo=rotulo)
+                bruto = (ler_valor_campo_cursor(self._pids_apac()) or "").strip()
             log.info(
                 "Lendo campo %s via buffer (cursor, sem teclas): %r",
                 rotulo,
@@ -1694,11 +1784,11 @@ class ApacAutomator:
         if digitar_antes:
             # So Home (sem Shift+End): selecionar com Shift+End adianta o foco no conhost
             enviar_tecla_hwnd(hwnd, VK_HOME, _SCAN_HOME, nome="Home")
-            time.sleep(0.1)
+            self._pausa("pos_home")
             a_digitar = digitar_antes[:max_chars]
             self._digitar_texto(a_digitar, hwnd)
             # Magnético: ao terminar de digitar, o foco já vai ao próximo — sem Tab
-            time.sleep(0.6)
+            self._pausa("pos_digitar")
             log.info("%s: digitado sem Tab (avanco automatico do Magnético).", rotulo)
         elif avancar_com_tab:
             hwnd = self._ativar_janela_apac(clicar_centro=False)
@@ -1706,7 +1796,7 @@ class ApacAutomator:
             enviou_tab = True
         else:
             log.info("%s: aceito sem Tab — foco permanece no campo.", rotulo)
-        time.sleep(0.45 if not enviou_tab else 0.9)
+        self._pausa("pos_tab_apos_aceitar" if enviou_tab else "pos_sem_tab")
 
         # Apos Tab: so buffer (nao clipboard) — se ja saiu da identificacao, para.
         if enviou_tab:
@@ -1899,7 +1989,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("COMPLEMENTO: Tab")
         self._enviar_tab(hwnd)
-        time.sleep(0.9)
+        self._pausa("pos_tab")
         self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab em COMPLEMENTO")
 
         self._complemento_aceito = True
@@ -1943,12 +2033,12 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("TELEFONE: Tab 1/2 (DDD)")
         self._enviar_tab(hwnd)
-        time.sleep(0.7)
+        self._pausa("pos_tab")
         self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab TELEFONE DDD")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("TELEFONE: Tab 2/2 (numero)")
         self._enviar_tab(hwnd)
-        time.sleep(0.7)
+        self._pausa("pos_tab")
         self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab TELEFONE numero")
 
         self._telefone_ddd_aceito = True
@@ -1980,7 +2070,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("EMAIL: Tab")
         self._enviar_tab(hwnd)
-        time.sleep(0.7)
+        self._pausa("pos_tab")
         self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab em EMAIL")
 
         self._email_aceito = True
@@ -2034,21 +2124,14 @@ class ApacAutomator:
             if not ok:
                 raise ApacBlockedError("operador recusou RACA/ETNIA")
 
-        time.sleep(0.6)
+        self._pausa("pos_raca_pre")
         aguardar_enter_solto()
         # Gate por rotulo — TELEFONE/MUNICIPIO etc. abortam aqui (nao digita 03)
+        # Um unico read: linha do gate + extrai valor de RACA (sem 2o AttachConsole)
         linha_gate = self.exigir_campo(CampoApac.ETNIA_RACA, passo="RACA")
-
-        try:
-            # Isola segmento apos RACA: (mesma linha que MUNICIPIO)
-            bruto = (
-                ler_valor_campo_cursor(
-                    self._pids_apac(), campo=CampoApac.ETNIA_RACA
-                )
-                or ""
-            ).strip()
-        except ConsoleScreenError as exc:
-            raise ApacBlockedError(f"RACA: falha ao ler buffer: {exc}") from exc
+        bruto = (
+            extrair_valor_campo_linha(linha_gate, campo=CampoApac.ETNIA_RACA) or ""
+        ).strip()
         texto = self._normalizar_leitura_campo("RACA", bruto)
         # Fallback: codigo na linha completa do gate (ex.: "RACA: 03 ??")
         if not _texto_parece_codigo_raca(texto) and linha_gate:
@@ -2088,9 +2171,9 @@ class ApacAutomator:
 
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         enviar_tecla_hwnd(hwnd, VK_HOME, _SCAN_HOME, nome="Home")
-        time.sleep(0.1)
+        self._pausa("pos_home")
         self._digitar_texto("03", hwnd)
-        time.sleep(0.5)
+        self._pausa("pos_raca_digitar")
         # Encerra imediatamente — nao envia Tab nem Shift+Tab depois do 03
         self._raca_aceito = True
         log.info(
@@ -2121,7 +2204,7 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("Insert — inclusao de novo cadastro")
         self._enviar_insert(hwnd)
-        time.sleep(1.0)
+        self._pausa("pos_insert")
 
         self._insert_inclusao_feito = True
         self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Insert")
@@ -2155,10 +2238,13 @@ class ApacAutomator:
             return
 
         confirmar = self._confirmar_nav()
-        intervalo = float(self.cfg.apac.get("intervalo_enter_navegacao_s") or 2.0)
+        intervalo = self._intervalo_nav_enter()
         log.info(
-            "Navegação inicial: submenu A.P.A.C. → CADASTRO → lista%s.",
+            "Navegação inicial: submenu A.P.A.C. → CADASTRO → lista%s "
+            "(intervalo=%.2fs, velocidade=%s).",
             " (com s)" if confirmar else " (automatico)",
+            intervalo,
+            self._velocidade,
         )
 
         if confirmar:
@@ -2194,7 +2280,7 @@ class ApacAutomator:
                 max_confirm,
             )
             self._enviar_enter(hwnd)
-            time.sleep(1.8)
+            self._pausa("pos_nav_retry")
             tela, texto = self.classificar_tela_atual()
             if tela == TelaApac.LISTA:
                 break
@@ -2438,7 +2524,7 @@ def open_apac_session(cfg: AppConfig) -> None:
     )
     automator.garantir_sessao_inicial_limpa()
     automator.ensure_running()
-    time.sleep(1.0)
+    automator._pausa("pos_apos_ensure")
     automator.exigir_tela(TelaApac.MENU, passo="inicio open-apac")
     automator.navegar_ate_cadastro()
     automator.iniciar_inclusao_insert()
@@ -2520,7 +2606,7 @@ def dump_apac_screen(cfg: AppConfig) -> Path:
         raise ApacBlockedError("apac.titulo_janela não configurado.")
     automator.garantir_sessao_inicial_limpa()
     automator.ensure_running()
-    time.sleep(1.2)
+    automator._pausa("pos_apos_ensure")
     texto = automator.ler_tela_console()
     tela = classificar_tela(texto)
     log.info("dump-apac-screen: classificado como %s", tela.value)
