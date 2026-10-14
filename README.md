@@ -68,6 +68,8 @@ Edite `config.json`:
 | `dados_fixos` | Fixos por clínica: `cnes_*`, `tipo_apac` (`1` ou `3`; UI futura) |
 | `biodata.locators` | Seletores Playwright — `null` bloqueia consulta real |
 | `apac.usar_navegacao_inicial` | Menu → 2 Enter até a lista (uma vez por sessão) |
+| `apac.usar_conhost` | `true` (padrão) = abre o APAC no console clássico para ler o buffer da tela |
+| `apac.reiniciar_se_ja_aberto` | `true` (padrão) = no `open-apac`/`dump-apac-screen`, encerra APAC já aberto e reabre limpo no MENU |
 | `apac.confirmar_navegacao_inicial` | `false` = passos mapeados no `open-apac` rodam sem `s`; `true` = pede `s` em cada um. Passos **novos** sempre pedem `s` |
 | `apac.intervalo_enter_navegacao_s` | Pausa entre o 1º e o 2º Enter |
 | `apac.paciente_inicio` | Nome do 1º paciente no `open-apac` (NUMERO) |
@@ -75,6 +77,8 @@ Edite `config.json`:
 | `apac.caminho_exe` | Caminho do `APAC.exe` (padrão `C:\APAC\APAC.exe`) |
 | `apac.timeout_abrir_s` | Segundos para aguardar a janela após iniciar o exe |
 | `apac.permitir_salvar` | Deve permanecer `false` até o save estar mapeado |
+
+A automação lê o **buffer do console** (não só clipboard) para saber a tela (MENU, LISTA, IDENTIFICACAO, PROCEDIMENTOS) e o **rótulo do campo** na linha do cursor. Se a tela ou o campo não for o esperado, o bot **para** — não digita nem dá Tab no campo errado. Se falhar o rótulo, rode `dump-apac-screen` nesse campo e ajuste os marcadores em `console_screen.py`.
 
 Não coloque senhas no JSON. O login no BIODATA é manual, em perfil de navegador dedicado (`browser_profile/`).
 
@@ -87,8 +91,11 @@ Não coloque senhas no JSON. O login no BIODATA é manual, em perfil de navegado
 # Abrir BIODATA no Chromium (login manual; ainda sem buscar paciente)
 .\.venv\Scripts\python.exe -m apac_bot open-biodata --config config.json
 
-# Abrir o APAC Magnético (inicia C:\APAC\APAC.exe se a janela não estiver aberta)
+# Abrir o APAC Magnético (inicia C:\APAC\APAC.exe no conhost se necessário)
 .\.venv\Scripts\python.exe -m apac_bot open-apac --config config.json
+
+# Ler o buffer da tela do APAC (imprime + salva em capturas/)
+.\.venv\Scripts\python.exe -m apac_bot dump-apac-screen --config config.json
 
 # Consultar origem e registrar progresso (exige locators se sistema_origem=biodata)
 .\.venv\Scripts\python.exe -m apac_bot fetch --config config.json --limit 5

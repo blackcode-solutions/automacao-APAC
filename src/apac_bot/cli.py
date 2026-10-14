@@ -8,7 +8,7 @@ from pathlib import Path
 if __name__ == "__main__" and str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from apac_bot.apac import ApacBlockedError, open_apac_session
+from apac_bot.apac import ApacBlockedError, dump_apac_screen, open_apac_session
 from apac_bot.config import ConfigError, load_config
 from apac_bot.connectors.biodata import BiodataMappingError, open_biodata_session
 from apac_bot.logging_safe import setup_logging
@@ -82,6 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_config_arg(p_apac)
 
+    p_dump = sub.add_parser(
+        "dump-apac-screen",
+        help=(
+            "Abre o APAC no conhost (se preciso), le o buffer da tela, "
+            "imprime e salva em capturas/"
+        ),
+    )
+    _add_config_arg(p_dump)
+
     return parser
 
 
@@ -128,6 +137,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "open-apac":
             open_apac_session(cfg)
+            return 0
+        if args.command == "dump-apac-screen":
+            path = dump_apac_screen(cfg)
+            log.info("Dump concluido: %s", path)
             return 0
     except (BiodataMappingError, ApacBlockedError) as exc:
         log.error("%s", exc)

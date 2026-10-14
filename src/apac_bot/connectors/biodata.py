@@ -71,7 +71,6 @@ class BiodataConnector:
         timeout = int(self.cfg.timeouts.get("biodata_ms", 15000))
 
         self._pw = sync_playwright().start()
-        url = biodata["url"]
 
         def _launch() -> None:
             self._context = self._pw.chromium.launch_persistent_context(
@@ -83,40 +82,37 @@ class BiodataConnector:
             self._page.set_default_timeout(timeout)
 
         _launch()
-        log.info("Abrindo BIODATA (perfil dedicado).")
+        log.info("Abrindo BIODATA (perfil dedicado — cookies de sessao preservados).")
         locs = login_locators(self.cfg)
         pagina_ok = _escolher_pagina_ja_logada(self._context, locs)
         if pagina_ok is not None:
             self._page = pagina_ok
             self._page.set_default_timeout(timeout)
-            log.info("Sessão BIODATA já autenticada — reutilizando aba (sem novo login).")
-        else:
-            self._page.goto(url)
-            try:
-                ensure_biodata_login(self._page, self.cfg)
-            except BiodataMappingError:
-                # Não apaga perfil se a sessão ficou autenticada após o erro
-                if _pagina_autenticada(self._page, locs):
-                    log.warning(
-                        "Login reportou falha, mas sessão autenticada — seguindo sem recriar perfil."
-                    )
+            log.info("Aba BIODATA ja autenticada — reutilizando.")
+        try:
+            _abrir_ou_reusar_sessao(self._page, self.cfg)
+        except BiodataMappingError:
+            # Nao apaga o perfil (destruiria a sessao de ~4h). Retry via /home.
+            home = _url_home_biodata(self.cfg)
+            if home:
+                log.warning(
+                    "Falha ao abrir sessao BIODATA — retry unico em /home "
+                    "(perfil mantido)."
+                )
+                try:
+                    self._page.goto(home, wait_until="domcontentloaded")
+                    self._page.wait_for_timeout(1000)
+                    _dismiss_blocking_overlays(self._page)
+                except Exception as exc:
+                    log.warning("Retry /home falhou: %s", exc)
+                if _pagina_autenticada(self._page, locs) or _menu_lateral_visivel(
+                    self._page
+                ):
+                    log.info("Sessão BIODATA recuperada no retry /home.")
                 else:
-                    log.warning(
-                        "Login falhou na 1ª tentativa e sessão não autenticada; "
-                        "recriando perfil do navegador."
-                    )
-                    try:
-                        self._context.close()
-                    except Exception:
-                        pass
-                    import shutil
-
-                    if user_data.exists():
-                        shutil.rmtree(user_data, ignore_errors=True)
-                    user_data.mkdir(parents=True, exist_ok=True)
-                    _launch()
-                    self._page.goto(url, wait_until="domcontentloaded")
-                    ensure_biodata_login(self._page, self.cfg)
+                    raise
+            else:
+                raise
         self._abrir_cadastro_pacientes()
 
     def _nav(self) -> dict:
@@ -589,7 +585,7 @@ def _tem_application_error(page) -> bool:
 
 
 def _recarregar_apos_application_error(page, cfg: AppConfig) -> None:
-    """F5 / reload; se o erro persistir, goto na URL do BIODATA."""
+    """F5 / reload; se o erro persistir, tenta /home e por fim a URL base."""
     log.warning("BIODATA Application error detectado — recarregando (F5).")
     try:
         page.reload(wait_until="domcontentloaded")
@@ -599,12 +595,91 @@ def _recarregar_apos_application_error(page, cfg: AppConfig) -> None:
     _dismiss_blocking_overlays(page)
     if not _tem_application_error(page):
         return
+    home = _url_home_biodata(cfg)
+    if home:
+        log.warning("Application error persiste — tentando home %s.", home)
+        try:
+            page.goto(home, wait_until="domcontentloaded")
+            page.wait_for_timeout(1000)
+            _dismiss_blocking_overlays(page)
+            if not _tem_application_error(page):
+                return
+        except Exception as exc:
+            log.warning("Falha ao abrir home apos Application error: %s", exc)
     url = (cfg.biodata or {}).get("url")
     if url:
-        log.warning("Application error persiste após reload — abrindo URL de login.")
+        log.warning("Application error persiste — abrindo URL base do BIODATA.")
         page.goto(str(url), wait_until="domcontentloaded")
         page.wait_for_timeout(1000)
         _dismiss_blocking_overlays(page)
+
+
+def _abrir_ou_reusar_sessao(page, cfg: AppConfig) -> None:
+    """
+    Abre /home com o perfil persistente. Se a sessao de ~4h ainda vale,
+    nao faz login. So chama ensure_biodata_login se /home exigir autenticacao.
+    """
+    locs = login_locators(cfg)
+    home = _url_home_biodata(cfg)
+    if not home:
+        raise BiodataMappingError(
+            "biodata.url e obrigatorio para abrir /home (reuso de sessao)."
+        )
+
+    log.info("Abrindo BIODATA em %s (reuso de sessao se ainda valida).", home)
+    try:
+        page.goto(home, wait_until="domcontentloaded")
+    except Exception as exc:
+        log.warning("Falha ao abrir home (%s): %s — tentando URL base.", home, exc)
+        url = (cfg.biodata or {}).get("url")
+        if not url:
+            raise BiodataMappingError(str(exc)) from exc
+        page.goto(str(url), wait_until="domcontentloaded")
+
+    page.wait_for_timeout(800)
+    _dismiss_blocking_overlays(page)
+
+    if _tem_application_error(page):
+        _recarregar_apos_application_error(page, cfg)
+
+    if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
+        log.info("Sessão BIODATA válida — /home sem novo login.")
+        return
+
+    # Cookie pode demorar a aplicar / redirect ainda em curso
+    try:
+        page.wait_for_function(
+            """() => {
+              const p = (location.pathname || '').toLowerCase();
+              return p.includes('/home') || p.includes('/consultorio');
+            }""",
+            timeout=5000,
+        )
+        _dismiss_blocking_overlays(page)
+        if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
+            log.info("Sessão BIODATA válida — /home sem novo login.")
+            return
+    except Exception:
+        pass
+
+    log.info("Sessão BIODATA nao confirmada em /home — seguindo para login.")
+    ensure_biodata_login(page, cfg)
+
+    # Apos login (ou falha parcial), garantir area logada via /home
+    if not (_pagina_autenticada(page, locs) or _menu_lateral_visivel(page)):
+        try:
+            page.goto(home, wait_until="domcontentloaded")
+            page.wait_for_timeout(800)
+            _dismiss_blocking_overlays(page)
+        except Exception as exc:
+            log.warning("Retry /home apos login falhou: %s", exc)
+    if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
+        log.info("Sessão BIODATA confirmada apos login/home.")
+        return
+    raise BiodataMappingError(
+        "Nao foi possivel confirmar sessao BIODATA em /home apos login. "
+        "Verifique credenciais em secrets.local.json ou faca login manual uma vez."
+    )
 
 
 def ensure_biodata_login(page, cfg: AppConfig) -> None:
@@ -655,15 +730,18 @@ def ensure_biodata_login(page, cfg: AppConfig) -> None:
                 precisa_login = campo.is_visible(timeout=4000) and campo.is_enabled()
             except Exception:
                 precisa_login = False
-        # Campo existe no DOM mas está oculto/desabilitado: força reload da URL de login
-        url = (cfg.biodata or {}).get("url")
-        if not precisa_login and url:
-            page.goto(str(url), wait_until="domcontentloaded")
-            page.wait_for_timeout(1000)
-            _dismiss_blocking_overlays(page)
+        # Preferir /home (sessao) em vez de forcar URL de login
+        home = _url_home_biodata(cfg)
+        if not precisa_login and home:
+            try:
+                page.goto(home, wait_until="domcontentloaded")
+                page.wait_for_timeout(1000)
+                _dismiss_blocking_overlays(page)
+            except Exception as exc:
+                log.warning("ensure_biodata_login: falha ao abrir home: %s", exc)
             if _tem_application_error(page):
                 _recarregar_apos_application_error(page, cfg)
-            if _pagina_autenticada(page, locs):
+            if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
                 log.info("Sessão BIODATA já autenticada — sem novo login.")
                 return
             campo = page.locator(locs["campo_usuario"]).first
@@ -672,7 +750,7 @@ def ensure_biodata_login(page, cfg: AppConfig) -> None:
             except Exception:
                 precisa_login = False
         if not precisa_login:
-            if _pagina_autenticada(page, locs):
+            if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
                 log.info("Sessão BIODATA já autenticada — sem novo login.")
                 return
             raise BiodataMappingError(
@@ -933,7 +1011,7 @@ def open_biodata_session(cfg: AppConfig) -> None:
     user_data.mkdir(parents=True, exist_ok=True)
     timeout = int(cfg.timeouts.get("biodata_ms", 15000))
 
-    log.info("Abrindo BIODATA em %s (perfil local dedicado).", url)
+    log.info("Abrindo BIODATA (perfil local dedicado — reuso de /home).")
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
             user_data_dir=str(user_data),
@@ -945,12 +1023,11 @@ def open_biodata_session(cfg: AppConfig) -> None:
             page = _escolher_pagina_ja_logada(context, locs)
             if page is not None:
                 page.set_default_timeout(timeout)
-                log.info("Sessão BIODATA já autenticada — reutilizando aba (sem novo login).")
+                log.info("Aba BIODATA ja autenticada — reutilizando.")
             else:
                 page = context.pages[0] if context.pages else context.new_page()
                 page.set_default_timeout(timeout)
-                page.goto(str(url))
-                ensure_biodata_login(page, cfg)
+            _abrir_ou_reusar_sessao(page, cfg)
             pendentes = biodata_locators_pendentes(cfg)
             if not pendentes:
                 # Reutiliza a lógica do conector sem bloquear no __init__ por estado

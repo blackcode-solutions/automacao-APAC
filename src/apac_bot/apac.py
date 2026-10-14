@@ -2,17 +2,48 @@ from __future__ import annotations
 
 import calendar
 import ctypes
+import os
 import re
 import subprocess
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from apac_bot.config import AppConfig
 from apac_bot.connectors import BiodataMappingError, build_connector
+from apac_bot.console_screen import (
+    CampoApac,
+    ConsoleScreenError,
+    TelaApac,
+    campo_compativel,
+    classificar_tela,
+    identificar_campo_cursor,
+    ler_buffer_apac,
+    ler_valor_campo_cursor,
+    preview_tela,
+)
+
+# Rotulos usados em _aceitar_campo_texto_se_preenchido / Tabs cegos
+_ROTULO_PARA_CAMPO: dict[str, CampoApac] = {
+    "NOME": CampoApac.NOME,
+    "NOME DA MAE": CampoApac.NOME_MAE,
+    "NOME DO RESPONSAVEL": CampoApac.RESPONSAVEL,
+    "CEP": CampoApac.CEP,
+    "LOGRADOURO": CampoApac.LOGRADOURO,
+    "ENDERECO": CampoApac.ENDERECO,
+    "NUMERO": CampoApac.NUMERO,
+    "COMPLEMENTO": CampoApac.COMPLEMENTO,
+    "BAIRRO": CampoApac.BAIRRO,
+    "TELEFONE": CampoApac.TELEFONE,
+    "EMAIL": CampoApac.EMAIL,
+    "DATA DE NASCIMENTO": CampoApac.NASCIMENTO,
+    "SEXO": CampoApac.SEXO,
+    "RACA": CampoApac.ETNIA_RACA,
+    "RACA/ETNIA": CampoApac.ETNIA_RACA,
+}
 from apac_bot.logging_safe import setup_logging
 from apac_bot.models import Lancamento
 from apac_bot.normalize import nascimento_ddmmaaaa, sexo_para_apac
@@ -187,6 +218,7 @@ VK_RIGHT = 0x27
 VK_A = 0x41
 VK_C = 0x43
 _SCAN_RIGHT = 0x4D
+_SCAN_HOME = 0x47
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 KEYEVENTF_KEYUP = 0x0002
@@ -338,6 +370,57 @@ def enviar_tab_hwnd(hwnd: int) -> None:
     time.sleep(0.15)
 
 
+def enviar_shift_tab_hwnd(hwnd: int) -> None:
+    """Envia Shift+Tab (volta um campo) com foco no APAC."""
+    user32 = ctypes.windll.user32
+    aguardar_enter_solto(timeout_s=1.0)
+    ativar_hwnd(hwnd)
+    time.sleep(0.1)
+    user32.keybd_event(VK_SHIFT, 0, 0, 0)
+    time.sleep(0.02)
+    enviar_tecla_hwnd(hwnd, VK_TAB, _SCAN_TAB, nome="Shift+Tab")
+    user32.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
+    time.sleep(0.2)
+
+
+def _texto_parece_municipio_ibge(texto: str) -> bool:
+    """Ex.: '211130 / SAO LUIS' (codigo IBGE + cidade) — nao e RACA/ETNIA."""
+    t = (texto or "").strip().upper()
+    if not t:
+        return False
+    return bool(re.match(r"^\d{6,7}\s*/\s*[A-ZÁÉÍÓÚÃÕÇ ]", t))
+
+
+def _texto_parece_codigo_raca(texto: str) -> bool:
+    """Codigo de raca/etnia tipico: 01..05 ou 1..5 (1-2 digitos)."""
+    t = (texto or "").strip()
+    if not t:
+        return False
+    return bool(re.fullmatch(r"0?[1-5]", t))
+
+
+def _texto_parece_campo_errado_para_raca(texto: str) -> bool:
+    """True se o valor claramente nao e ETNIA/RACA (telefone, email, nome, etc.)."""
+    t = (texto or "").strip()
+    if not t:
+        return False
+    if _texto_parece_municipio_ibge(t):
+        return True
+    if _texto_parece_codigo_raca(t):
+        return False
+    # Telefone / DDD+numero
+    digitos = "".join(ch for ch in t if ch.isdigit())
+    if len(digitos) >= 8:
+        return True
+    if "@" in t or "HTTP" in t.upper():
+        return True
+    # Nome / texto longo
+    letras = sum(1 for ch in t if ch.isalpha())
+    if letras >= 6:
+        return True
+    return False
+
+
 def enviar_insert_hwnd(hwnd: int) -> None:
     """Envia Insert para a janela do APAC (inclusão na lista)."""
     enviar_tecla_hwnd(hwnd, VK_INSERT, _SCAN_INSERT, nome="Insert")
@@ -449,9 +532,12 @@ def _selecionar_campo_home_shift_end(hwnd: int) -> None:
 def _cancelar_selecao_campo(hwnd: int) -> None:
     """
     Apos Ctrl+C o texto fica selecionado; Tab com selecao no Magnético pode
-    comportar-se mal. Right solta a selecao sem mudar de campo.
+    comportar-se mal.
+
+    Usa Home (nao Right): em conhost/APAC, Right no fim do campo pode ir ao
+    proximo campo e causar avanço duplo (Tab em seguida = pula tela).
     """
-    enviar_tecla_hwnd(hwnd, VK_RIGHT, _SCAN_RIGHT, nome="Right")
+    enviar_tecla_hwnd(hwnd, VK_HOME, _SCAN_HOME, nome="Home")
     time.sleep(0.08)
 
 
@@ -775,8 +861,27 @@ class ApacAutomator:
         return True
 
     def _iniciar_exe(self, exe: Path) -> None:
-        """Abre como o Explorer (start), para o Windows Terminal hospedar o console."""
-        # start "" /D "C:\APAC" APAC.exe  — destaca do console do Cursor
+        """
+        Abre o APAC.
+        Com apac.usar_conhost=true (padrao): conhost classico (buffer legivel).
+        Com false: start via cmd (pode cair no Windows Terminal).
+        """
+        usar_conhost = self._flag_apac_bool("usar_conhost", True)
+        if usar_conhost:
+            system_root = os.environ.get("SystemRoot", r"C:\Windows")
+            conhost = Path(system_root) / "System32" / "conhost.exe"
+            if not conhost.is_file():
+                raise ApacBlockedError(f"conhost.exe nao encontrado em {conhost}")
+            log.info("Iniciando APAC via conhost: %s -- %s", conhost, exe)
+            # CREATE_NEW_CONSOLE: janela propria, destacada do terminal do Cursor
+            self._proc = subprocess.Popen(
+                [str(conhost), "--", str(exe)],
+                cwd=str(exe.parent),
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010),
+            )
+            return
+
+        # Fallback legado (WT / padrao do usuario)
         self._proc = subprocess.Popen(
             ["cmd", "/c", "start", "", "/D", str(exe.parent), exe.name],
             cwd=str(exe.parent),
@@ -934,6 +1039,143 @@ class ApacAutomator:
         if not ok:
             raise ApacBlockedError(f"operador recusou passo novo: {prompt.strip()}")
         aguardar_enter_solto()
+
+    def _flag_apac_bool(self, chave: str, default: bool = False) -> bool:
+        val = self.cfg.apac.get(chave, default)
+        if isinstance(val, str):
+            return val.strip().lower() in {"1", "true", "sim", "yes"}
+        return bool(val)
+
+    def _encerrar_apac_processo(self) -> None:
+        """taskkill /IM APAC.exe /F e zera flags de sessao local."""
+        subprocess.run(
+            ["taskkill", "/IM", APAC_PROCESS_NAME, "/F"],
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        time.sleep(1.5)
+        self._ensure_feito = False
+        self._nav_inicial_feita = False
+        self._insert_inclusao_feito = False
+
+    def garantir_sessao_inicial_limpa(self) -> None:
+        """
+        Se apac.reiniciar_se_ja_aberto (default True) e APAC.exe ja roda:
+        encerra para reabrir no MENU via conhost (buffer legivel).
+        """
+        if not self._flag_apac_bool("reiniciar_se_ja_aberto", True):
+            return
+        if self.dry_run:
+            log.info(
+                "[dry-run] reiniciar_se_ja_aberto=true — encerraria APAC se aberto"
+            )
+            return
+        if not self._processo_rodando():
+            return
+        log.info("APAC ja aberto — reiniciando para MENU PRINCIPAL (conhost)")
+        self._encerrar_apac_processo()
+
+    def ler_tela_console(self) -> str:
+        """Le o buffer da tela do APAC.exe (exige conhost)."""
+        if self.dry_run:
+            return ""
+        try:
+            return ler_buffer_apac(self._pids_apac())
+        except ConsoleScreenError as exc:
+            raise ApacBlockedError(str(exc)) from exc
+
+    def classificar_tela_atual(self) -> tuple[TelaApac, str]:
+        texto = self.ler_tela_console()
+        tela = classificar_tela(texto)
+        log.info(
+            "Tela APAC classificada: %s (%s)",
+            tela.value,
+            preview_tela(texto, 120),
+        )
+        return tela, texto
+
+    def exigir_tela(self, esperada: TelaApac, *, passo: str) -> str:
+        """
+        Le o buffer, classifica e aborta se nao for a tela esperada.
+        PROCEDIMENTOS sempre aborta com mensagem especifica.
+        """
+        if self.dry_run:
+            log.info("[dry-run] exigir_tela %s no passo %s", esperada.value, passo)
+            return ""
+        tela, texto = self.classificar_tela_atual()
+        if tela == TelaApac.PROCEDIMENTOS:
+            raise ApacBlockedError(
+                f"Passo '{passo}': tela e PROCEDIMENTOS REALIZADOS "
+                f"(preview: {preview_tela(texto)!r}). Pare — nao continuar."
+            )
+        if tela != esperada:
+            raise ApacBlockedError(
+                f"Passo '{passo}': esperava tela {esperada.value}, "
+                f"encontrou {tela.value} (preview: {preview_tela(texto)!r}). "
+                "Pare — volte a tela correta ou reinicie o APAC."
+            )
+        return texto
+
+    def exigir_campo(self, esperado: CampoApac, *, passo: str) -> str:
+        """
+        Exige IDENTIFICACAO e que a linha do cursor seja o campo esperado.
+        Sem recuperacao (Shift+Tab). Retorna a linha lida.
+        """
+        if self.dry_run:
+            log.info(
+                "[dry-run] exigir_campo %s no passo %s",
+                esperado.value,
+                passo,
+            )
+            return ""
+        self.exigir_tela(TelaApac.IDENTIFICACAO, passo=passo)
+        try:
+            campo, linha, cx = identificar_campo_cursor(self._pids_apac())
+        except ConsoleScreenError as exc:
+            raise ApacBlockedError(
+                f"Passo '{passo}': falha ao ler campo no cursor: {exc}"
+            ) from exc
+        if not campo_compativel(campo, esperado, linha=linha):
+            raise ApacBlockedError(
+                f"Passo '{passo}': esperava campo {esperado.value}, "
+                f"encontrou {campo.value} (linha: {linha[:80]!r}). "
+                "Pare — ajuste o foco ou rode dump-apac-screen e calibra os marcadores."
+            )
+        log.info(
+            "Campo OK passo=%s esperado=%s lido=%s cx=%s linha=%r",
+            passo,
+            esperado.value,
+            campo.value,
+            cx,
+            linha[:60],
+        )
+        return linha
+
+    def exigir_campo_nao_contato(self, *, passo: str) -> None:
+        """
+        Gate negativo no cabecalho: aborta se o cursor ja estiver em
+        telefone/municipio/etnia (fora da ordem inicial).
+        """
+        if self.dry_run:
+            return
+        try:
+            campo, linha, _cx = identificar_campo_cursor(self._pids_apac())
+        except ConsoleScreenError:
+            return
+        proibidos = {
+            CampoApac.TELEFONE,
+            CampoApac.EMAIL,
+            CampoApac.MUNICIPIO,
+            CampoApac.ETNIA_RACA,
+            CampoApac.BAIRRO,
+            CampoApac.COMPLEMENTO,
+        }
+        if campo in proibidos:
+            raise ApacBlockedError(
+                f"Passo '{passo}': foco em {campo.value} "
+                f"(linha: {linha[:80]!r}) — esperado cabecalho/identificacao inicial. "
+                "Pare e ajuste o foco."
+            )
 
     def preencher_numero_apac(self, lanc: Lancamento) -> None:
         """
@@ -1314,26 +1556,51 @@ class ApacAutomator:
 
         time.sleep(1.0)
         aguardar_enter_solto()
+        campo_esp = _ROTULO_PARA_CAMPO.get(rotulo.upper())
+        if campo_esp is not None:
+            self.exigir_campo(campo_esp, passo=rotulo)
+        else:
+            self.exigir_tela(TelaApac.IDENTIFICACAO, passo=rotulo)
         hwnd = self._ativar_janela_apac(clicar_centro=False)
-        log.info("Lendo campo %s via clipboard (Home/Shift+End)...", rotulo)
-        texto = ler_campo_focado_via_clipboard(hwnd)
-
-        if _texto_indica_tela_procedimentos(texto):
-            raise ApacBlockedError(
-                f"Antes de aceitar {rotulo}, o foco já parece estar em "
-                f"PROCEDIMENTOS REALIZADOS (leitura: {texto[:60]!r}). "
-                "Volte à tela de identificação no APAC e rode de novo — "
-                "provável avanço indevido em passo anterior."
+        # Preferir buffer no cursor — Home/Shift+End do clipboard adianta o foco
+        # e o Tab seguinte pula para PROCEDIMENTOS.
+        texto = ""
+        try:
+            bruto = (ler_valor_campo_cursor(self._pids_apac()) or "").strip()
+            log.info(
+                "Lendo campo %s via buffer (cursor, sem teclas): %r",
+                rotulo,
+                bruto[:80],
             )
-
-        if len(texto) > max_chars:
+            texto = self._normalizar_leitura_campo(rotulo, bruto)
+        except ConsoleScreenError as exc:
             log.warning(
-                "Clipboard com %s chars — leitura de %s duvidosa; pedindo revisao.",
+                "%s: buffer no cursor falhou (%s) — fallback clipboard.",
+                rotulo,
+                exc,
+            )
+            bruto = ler_campo_focado_via_clipboard(hwnd)
+            _cancelar_selecao_campo(hwnd)
+            log.info(
+                "Lendo campo %s via clipboard (fallback): %r",
+                rotulo,
+                bruto[:80],
+            )
+            texto = self._normalizar_leitura_campo(rotulo, bruto)
+
+        # Campos do APAC com linha “suja” no buffer: aceita valor isolado, sem barrar por len
+        rotulo_u = rotulo.upper()
+        if rotulo_u in {"CEP", "DATA DE NASCIMENTO", "SEXO"}:
+            if texto != (bruto or "").strip():
+                log.info("%s no APAC normalizado da linha: %r", rotulo, texto)
+        elif len(texto) > max_chars:
+            log.warning(
+                "Leitura com %s chars — %s duvidosa; pedindo revisao.",
                 len(texto),
                 rotulo,
             )
             raise ApacBlockedError(
-                f"{rotulo}: leitura via clipboard inconclusiva ({len(texto)} chars). "
+                f"{rotulo}: leitura inconclusiva ({len(texto)} chars). "
                 f"Confira o campo {rotulo} no APAC manualmente."
             )
 
@@ -1425,27 +1692,28 @@ class ApacAutomator:
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         enviou_tab = False
         if digitar_antes:
-            # Home/Shift+End evita Ctrl+A (efeito colateral em alguns consoles)
-            _selecionar_campo_home_shift_end(hwnd)
-            time.sleep(0.12)
-            # Evita estourar a mascara e digitar no campo seguinte
+            # So Home (sem Shift+End): selecionar com Shift+End adianta o foco no conhost
+            enviar_tecla_hwnd(hwnd, VK_HOME, _SCAN_HOME, nome="Home")
+            time.sleep(0.1)
             a_digitar = digitar_antes[:max_chars]
             self._digitar_texto(a_digitar, hwnd)
-            # Magnético: ao terminar de digitar/colar, o foco já vai ao próximo — sem Tab
+            # Magnético: ao terminar de digitar, o foco já vai ao próximo — sem Tab
             time.sleep(0.6)
             log.info("%s: digitado sem Tab (avanco automatico do Magnético).", rotulo)
         elif avancar_com_tab:
-            # Clipboard deixa o texto selecionado — soltar antes do Tab
-            _cancelar_selecao_campo(hwnd)
             hwnd = self._ativar_janela_apac(clicar_centro=False)
             self._enviar_tab(hwnd)
             enviou_tab = True
         else:
             log.info("%s: aceito sem Tab — foco permanece no campo.", rotulo)
-        time.sleep(0.45 if not enviou_tab else 0.6)
+        time.sleep(0.45 if not enviou_tab else 0.9)
 
-        # Nao reler clipboard apos Tab: Home/Shift+End no proximo campo desalinha o foco
-        # e pode empurrar o Magnético (desde NOME) ate PROCEDIMENTOS.
+        # Apos Tab: so buffer (nao clipboard) — se ja saiu da identificacao, para.
+        if enviou_tab:
+            self.exigir_tela(
+                TelaApac.IDENTIFICACAO,
+                passo=f"apos Tab em {rotulo}",
+            )
 
         setattr(self, flag_attr, True)
         log.info(
@@ -1506,13 +1774,68 @@ class ApacAutomator:
             vazio_aceita_tab=True,
         )
 
+    def _normalizar_leitura_campo(self, rotulo: str, texto: str) -> str:
+        """
+        Limpa leitura do buffer/clipboard quando a linha traz o proximo rotulo.
+        Mantem o valor do APAC (nao valida conteudo) — so isola o campo.
+        """
+        t = (texto or "").strip()
+        if not t:
+            return ""
+        ru = rotulo.upper()
+        if ru == "CEP":
+            # Ex.: "65041235 LOGRADOURO : 0" -> "65041235"
+            m = re.match(r"^(\d{5}-?\d{3})\b", t)
+            if m:
+                return m.group(1)
+            digitos = "".join(ch for ch in t if ch.isdigit())
+            if digitos:
+                return digitos[:8] if len(digitos) >= 8 else digitos
+            return t
+        if ru == "DATA DE NASCIMENTO":
+            # Ex.: "15/12/1975 SEXO: ETNIA :" -> "15/12/1975"
+            m = re.match(r"^(\d{2}/\d{2}/\d{4})\b", t)
+            if m:
+                return m.group(1)
+            m = re.match(r"^(\d{8})\b", t)
+            if m:
+                return m.group(1)
+            # Corta no rotulo seguinte
+            m2 = re.split(r"\s+(SEXO|ETNIA|RACA|RAÇA)\b", t, maxsplit=1, flags=re.I)
+            return (m2[0] if m2 else t).strip()
+        if ru == "SEXO":
+            # Ex.: "M ETNIA :" ou "MASCULINO ..."
+            m = re.match(r"^([MFmf12])\b", t)
+            if m:
+                return m.group(1).upper()
+            m2 = re.split(r"\s+(ETNIA|RACA|RAÇA)\b", t, maxsplit=1, flags=re.I)
+            return (m2[0] if m2 else t).strip()[:1].upper() if m2 else t
+        if ru == "RACA":
+            m = re.search(r"\bRACA\s*:?\s*(0?[1-5])\b", t, re.I)
+            if m:
+                return m.group(1)
+            m = re.fullmatch(r"0?[1-5]", t.strip())
+            if m:
+                return t.strip()
+            m2 = re.match(r"^(0?[1-5])\b", t)
+            if m2:
+                return m2.group(1)
+            # "03 ??" / lixo de mascara
+            m3 = re.match(r"^(0?[1-5])\s*\?+", t.strip())
+            if m3:
+                return m3.group(1)
+            return t
+        return t
+
     def aceitar_cep_se_preenchido(self, lanc: Lancamento) -> None:
-        """Apos NOME DO RESPONSAVEL: Tab se preenchido; se vazio, Tab para pular."""
+        """
+        CEP do APAC permanece — so Tab para aceitar (sem validar / sem redigitar).
+        """
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="CEP",
             flag_attr="_cep_aceito",
-            max_chars=20,
+            max_chars=80,
             vazio_aceita_tab=True,
         )
 
@@ -1523,7 +1846,6 @@ class ApacAutomator:
             rotulo="LOGRADOURO",
             flag_attr="_logradouro_aceito",
             max_chars=80,
-            aceitar_enter_se_cpf_preencheu=True,
             vazio_aceita_tab=True,
         )
 
@@ -1534,18 +1856,19 @@ class ApacAutomator:
             rotulo="ENDERECO",
             flag_attr="_endereco_aceito",
             max_chars=120,
-            aceitar_enter_se_cpf_preencheu=True,
             vazio_aceita_tab=True,
         )
 
     def aceitar_numero_endereco_se_preenchido(self, lanc: Lancamento) -> None:
-        """Apos ENDERECO: Tab se preenchido; se vazio, Tab para pular."""
+        """
+        Apos ENDERECO: Tab se preenchido; se vazio, Tab para pular.
+        Nao usa 'confia no CPF' — isso mandava Tab cego e ia para PROCEDIMENTOS.
+        """
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="NUMERO",
             flag_attr="_numero_end_aceito",
             max_chars=20,
-            aceitar_enter_se_cpf_preencheu=True,
             vazio_aceita_tab=True,
         )
 
@@ -1572,10 +1895,12 @@ class ApacAutomator:
                 raise ApacBlockedError("operador recusou Tab no COMPLEMENTO")
 
         aguardar_enter_solto()
+        self.exigir_campo(CampoApac.COMPLEMENTO, passo="COMPLEMENTO")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
-        log.info("COMPLEMENTO: Tab (sem clipboard)")
+        log.info("COMPLEMENTO: Tab")
         self._enviar_tab(hwnd)
-        time.sleep(0.5)
+        time.sleep(0.9)
+        self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab em COMPLEMENTO")
 
         self._complemento_aceito = True
         log.info("COMPLEMENTO: Tab ok — proximo campo (BAIRRO).")
@@ -1587,7 +1912,6 @@ class ApacAutomator:
             rotulo="BAIRRO",
             flag_attr="_bairro_aceito",
             max_chars=80,
-            aceitar_enter_se_cpf_preencheu=True,
             vazio_aceita_tab=True,
         )
 
@@ -1615,14 +1939,17 @@ class ApacAutomator:
                 raise ApacBlockedError("operador recusou Tabs no TELEFONE")
 
         aguardar_enter_solto()
+        self.exigir_campo(CampoApac.TELEFONE, passo="TELEFONE")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
-        log.info("TELEFONE: Tab 1/2 (DDD), sem clipboard")
+        log.info("TELEFONE: Tab 1/2 (DDD)")
         self._enviar_tab(hwnd)
-        time.sleep(0.35)
+        time.sleep(0.7)
+        self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab TELEFONE DDD")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
-        log.info("TELEFONE: Tab 2/2 (numero), sem clipboard")
+        log.info("TELEFONE: Tab 2/2 (numero)")
         self._enviar_tab(hwnd)
-        time.sleep(0.5)
+        time.sleep(0.7)
+        self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab TELEFONE numero")
 
         self._telefone_ddd_aceito = True
         self._telefone_num_aceito = True
@@ -1649,10 +1976,12 @@ class ApacAutomator:
                 raise ApacBlockedError("operador recusou Tab no EMAIL")
 
         aguardar_enter_solto()
+        self.exigir_campo(CampoApac.EMAIL, passo="EMAIL")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
-        log.info("EMAIL: Tab (sem clipboard)")
+        log.info("EMAIL: Tab")
         self._enviar_tab(hwnd)
-        time.sleep(0.5)
+        time.sleep(0.7)
+        self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab em EMAIL")
 
         self._email_aceito = True
         log.info("EMAIL: Tab ok — proximo campo (DATA DE NASCIMENTO).")
@@ -1667,7 +1996,7 @@ class ApacAutomator:
             lanc,
             rotulo="DATA DE NASCIMENTO",
             flag_attr="_nascimento_aceito",
-            max_chars=20,
+            max_chars=80,
             vazio_digita=digita if digita else "",
         )
 
@@ -1679,22 +2008,93 @@ class ApacAutomator:
             lanc,
             rotulo="SEXO",
             flag_attr="_sexo_aceito",
-            max_chars=20,
+            max_chars=80,
             vazio_digita=digita if digita else "",
         )
 
     def aceitar_raca_se_preenchido(self, lanc: Lancamento) -> None:
         """
-        RACA (ultimo passo): se preenchido, nao Tab (parar).
-        Se vazio, digita 03 (Magnético pode avançar sozinho) — sem Tab extra.
+        RACA/ETNIA (ultimo passo):
+        - exige rotulo ETNIA/RACA na linha do cursor (sem Shift+Tab)
+        - se ja tem codigo 01-05: para (sem Tab)
+        - se campo vazio: digita SO 03 e encerra
         """
-        self._aceitar_campo_texto_se_preenchido(
-            lanc,
-            rotulo="RACA",
-            flag_attr="_raca_aceito",
-            max_chars=10,
-            vazio_digita="03",
-            avancar_com_tab=False,
+        if self._raca_aceito:
+            return
+
+        if self.dry_run:
+            log.info("[dry-run] RACA/ETNIA — aceitar ou digitar 03 (sem Tab)")
+            self._raca_aceito = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                f"RACA/ETNIA de {lanc.paciente_nome} — digite s para conferir: "
+            )
+            if not ok:
+                raise ApacBlockedError("operador recusou RACA/ETNIA")
+
+        time.sleep(0.6)
+        aguardar_enter_solto()
+        # Gate por rotulo — TELEFONE/MUNICIPIO etc. abortam aqui (nao digita 03)
+        linha_gate = self.exigir_campo(CampoApac.ETNIA_RACA, passo="RACA")
+
+        try:
+            # Isola segmento apos RACA: (mesma linha que MUNICIPIO)
+            bruto = (
+                ler_valor_campo_cursor(
+                    self._pids_apac(), campo=CampoApac.ETNIA_RACA
+                )
+                or ""
+            ).strip()
+        except ConsoleScreenError as exc:
+            raise ApacBlockedError(f"RACA: falha ao ler buffer: {exc}") from exc
+        texto = self._normalizar_leitura_campo("RACA", bruto)
+        # Fallback: codigo na linha completa do gate (ex.: "RACA: 03 ??")
+        if not _texto_parece_codigo_raca(texto) and linha_gate:
+            m = re.search(r"\bRACA\s*:?\s*(0?[1-5])\b", linha_gate, re.I)
+            if m:
+                texto = m.group(1)
+        log.info(
+            "RACA leitura — buffer=%r normalizado=%r linha=%r",
+            bruto[:60],
+            texto[:40],
+            (linha_gate or "")[:70],
+        )
+
+        if _texto_parece_codigo_raca(texto):
+            log.info("RACA ja preenchida (%s) — fim (sem Tab).", texto)
+            self._raca_aceito = True
+            return
+
+        # Municipio vazou na leitura — nao digitar 03
+        if _texto_parece_municipio_ibge(bruto) or _texto_parece_municipio_ibge(texto):
+            raise ApacBlockedError(
+                "RACA: leitura ainda parece MUNICIPIO "
+                f"({bruto[:40]!r}). Ajuste o foco em RACA e rode de novo."
+            )
+
+        # So digita 03 se o campo estiver vazio (ou lixo minimo)
+        if texto and texto not in {":", "-", ".", "0", "??", "?"}:
+            raise ApacBlockedError(
+                f"RACA: valor inesperado {texto!r} — nao sobrescreve. "
+                "Confira o campo RACA no APAC."
+            )
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn("RACA vazia — digite s para enviar 03 (sem Tab): ")
+            if not ok:
+                raise ApacBlockedError("operador recusou digitar RACA=03")
+
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        enviar_tecla_hwnd(hwnd, VK_HOME, _SCAN_HOME, nome="Home")
+        time.sleep(0.1)
+        self._digitar_texto("03", hwnd)
+        time.sleep(0.5)
+        # Encerra imediatamente — nao envia Tab nem Shift+Tab depois do 03
+        self._raca_aceito = True
+        log.info(
+            "RACA=03 digitado — FIM da identificacao (nenhuma tecla apos o 03)."
         )
 
     def iniciar_inclusao_insert(self) -> None:
@@ -1717,20 +2117,23 @@ class ApacAutomator:
             if not ok:
                 raise ApacBlockedError("operador recusou Insert (inclusao)")
 
+        self.exigir_tela(TelaApac.LISTA, passo="antes do Insert")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         log.info("Insert — inclusao de novo cadastro")
         self._enviar_insert(hwnd)
         time.sleep(1.0)
 
         self._insert_inclusao_feito = True
-        log.info("Insert enviado — deve estar na tela de inclusao / Identificacao.")
+        self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Insert")
+        log.info("Insert ok — tela IDENTIFICACAO confirmada via buffer.")
 
     def navegar_ate_cadastro(self) -> None:
         """
-        Apos abrir o APAC (MENU PRINCIPAL, foco em A.P.A.C.):
-          Enter 1 -> abre opcoes do botao A.P.A.C. (ja selecionado)
-          Enter 2 -> CADASTRO DE APAC -> lista ATUALIZACAO DE APAC
-        Para ai (sem 3o Enter). Uma vez por sessao.
+        Apos abrir o APAC (MENU - PRINCIPAL, foco em A.P.A.C.):
+          Enter 1 -> abre submenu (CADASTRO DE APAC / CONSISTENCIA)
+          Enter 2 -> confirma CADASTRO DE APAC -> lista
+          Se ainda MENU (Enter 2 nao 'pegou'), Enter extra ate LISTA (max 2).
+        Uma vez por sessao.
         """
         if self._nav_inicial_feita:
             return
@@ -1745,7 +2148,8 @@ class ApacAutomator:
 
         if self.dry_run:
             log.info(
-                "[dry-run] navegação: 2 Enter (A.P.A.C. → CADASTRO) → lista"
+                "[dry-run] navegação: Enter submenu → Enter CADASTRO → lista "
+                "(retry se ainda MENU)"
             )
             self._nav_inicial_feita = True
             return
@@ -1753,7 +2157,7 @@ class ApacAutomator:
         confirmar = self._confirmar_nav()
         intervalo = float(self.cfg.apac.get("intervalo_enter_navegacao_s") or 2.0)
         log.info(
-            "Navegação inicial: 2 Enter%s.",
+            "Navegação inicial: submenu A.P.A.C. → CADASTRO → lista%s.",
             " (com s)" if confirmar else " (automatico)",
         )
 
@@ -1764,25 +2168,61 @@ class ApacAutomator:
             if not ok:
                 raise ApacBlockedError("operador recusou Enter 1/2 (A.P.A.C.)")
 
+        self.exigir_tela(TelaApac.MENU, passo="navegacao inicial Enter 1/2")
         hwnd = self._ativar_janela_apac(clicar_centro=True)
-        log.info("Enter 1/2 — A.P.A.C.")
+        log.info("Enter 1 — abre submenu A.P.A.C. (CADASTRO / CONSISTENCIA)")
         self._enviar_enter(hwnd)
         time.sleep(intervalo)
 
-        if confirmar:
-            ok = self.confirm_fn(
-                "2/2 submenu CADASTRO DE APAC selecionado? digite s para ENTER: "
+        # Enter 2 (+ retry): confirmar CADASTRO ate sair do MENU
+        max_confirm = 2
+        for tentativa in range(1, max_confirm + 1):
+            if confirmar:
+                ok = self.confirm_fn(
+                    f"CADASTRO DE APAC selecionado? digite s para ENTER "
+                    f"({tentativa}/{max_confirm}): "
+                )
+                if not ok:
+                    raise ApacBlockedError(
+                        f"operador recusou Enter CADASTRO ({tentativa}/{max_confirm})"
+                    )
+            # Sem clique: clique no centro fecha o submenu
+            hwnd = self._ativar_janela_apac(clicar_centro=False)
+            log.info(
+                "Enter %s/%s — confirmar CADASTRO DE APAC",
+                tentativa,
+                max_confirm,
             )
-            if not ok:
-                raise ApacBlockedError("operador recusou Enter 2/2 (CADASTRO DE APAC)")
-
-        # Sem clique: clique no centro fecha o submenu
-        hwnd = self._ativar_janela_apac(clicar_centro=False)
-        log.info("Enter 2/2 — CADASTRO DE APAC")
-        self._enviar_enter(hwnd)
-        time.sleep(1.5)
+            self._enviar_enter(hwnd)
+            time.sleep(1.8)
+            tela, texto = self.classificar_tela_atual()
+            if tela == TelaApac.LISTA:
+                break
+            if tela == TelaApac.PROCEDIMENTOS:
+                raise ApacBlockedError(
+                    "Navegacao: caiu em PROCEDIMENTOS ao confirmar CADASTRO "
+                    f"(preview: {preview_tela(texto)!r})."
+                )
+            if tela != TelaApac.MENU:
+                # Saiu do menu mas classificador ainda nao ve LISTA — exige LISTA abaixo
+                log.warning(
+                    "Apos Enter CADASTRO tela=%s (preview: %s) — seguindo para gate LISTA",
+                    tela.value,
+                    preview_tela(texto),
+                )
+                break
+            log.warning(
+                "Ainda MENU apos Enter CADASTRO %s/%s — novo Enter "
+                "(submenu pode nao ter confirmado).",
+                tentativa,
+                max_confirm,
+            )
+        else:
+            # esgotou retries ainda em MENU
+            pass
 
         self._nav_inicial_feita = True
+        self.exigir_tela(TelaApac.LISTA, passo="apos navegacao (lista)")
         log.info(
             "Navegação concluída — lista ATUALIZACAO DE APAC. "
             "Proximo passo sera Insert (nao Enter)."
@@ -1981,6 +2421,7 @@ def open_apac_session(cfg: AppConfig) -> None:
     """
     Abre o APAC ate RACA: CPF (BIODATA), identificacao ate email,
     nascimento, sexo e raca (03 se vazio). Sessao BIODATA aberta ate o fim.
+    Gates de tela via buffer do console (conhost).
     """
     automator = ApacAutomator(cfg, dry_run=False)
     if not cfg.apac.get("titulo_janela"):
@@ -1995,9 +2436,16 @@ def open_apac_session(cfg: AppConfig) -> None:
         lanc.numeracao_apac,
         lanc.linha_planilha,
     )
+    automator.garantir_sessao_inicial_limpa()
     automator.ensure_running()
+    time.sleep(1.0)
+    automator.exigir_tela(TelaApac.MENU, passo="inicio open-apac")
     automator.navegar_ate_cadastro()
     automator.iniciar_inclusao_insert()
+
+    # Bloco 1 — cabecalho
+    automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco cabecalho")
+    automator.exigir_campo_nao_contato(passo="bloco cabecalho")
     automator.preencher_numero_apac(lanc)
     automator.preencher_cnes_unidade(lanc)
     automator.preencher_validade_mes_anterior()
@@ -2023,17 +2471,26 @@ def open_apac_session(cfg: AppConfig) -> None:
             raise ApacBlockedError(str(exc)) from exc
         automator._biodata_connector = connector
         cpf = buscar_paciente_biodata(connector, lanc)
+
+        # Bloco 2 — CPF / nomes
+        automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco cpf/nomes")
         automator.preencher_cpf_apac(lanc, cpf)
         automator.preencher_situacao_rua()
         automator.aceitar_nome_se_preenchido(lanc)
         automator.aceitar_nome_mae_se_preenchido(lanc)
         automator.aceitar_nome_responsavel_se_preenchido(lanc)
+
+        # Bloco 3 — endereco
+        automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco endereco")
         automator.aceitar_cep_se_preenchido(lanc)
         automator.aceitar_logradouro_se_preenchido(lanc)
         automator.aceitar_endereco_se_preenchido(lanc)
         automator.aceitar_numero_endereco_se_preenchido(lanc)
         automator.aceitar_complemento_se_preenchido(lanc)
         automator.aceitar_bairro_se_preenchido(lanc)
+
+        # Bloco 4 — contato / nascimento / sexo / raca
+        automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco contato/raca")
         automator.aceitar_telefone_se_preenchido(lanc)
         automator.aceitar_email_se_preenchido(lanc)
         automator.aceitar_nascimento_se_preenchido(lanc)
@@ -2051,6 +2508,36 @@ def open_apac_session(cfg: AppConfig) -> None:
                 connector.close()
             except Exception:
                 pass
+
+
+def dump_apac_screen(cfg: AppConfig) -> Path:
+    """
+    Abre/foca o APAC (conhost), le o buffer e grava em capturas/.
+    Retorna o caminho do arquivo salvo.
+    """
+    automator = ApacAutomator(cfg, dry_run=False)
+    if not cfg.apac.get("titulo_janela"):
+        raise ApacBlockedError("apac.titulo_janela não configurado.")
+    automator.garantir_sessao_inicial_limpa()
+    automator.ensure_running()
+    time.sleep(1.2)
+    texto = automator.ler_tela_console()
+    tela = classificar_tela(texto)
+    log.info("dump-apac-screen: classificado como %s", tela.value)
+    print("--- buffer APAC ---")
+    print(texto)
+    print("--- fim ---")
+    print(f"classificacao: {tela.value}")
+
+    pasta = Path(cfg.diagnostico.get("pasta_capturas") or "capturas")
+    pasta.mkdir(parents=True, exist_ok=True)
+    destino = pasta / f"apac_screen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    destino.write_text(
+        f"# tela={tela.value}\n{texto}\n",
+        encoding="utf-8",
+    )
+    log.info("Buffer salvo em %s", destino)
+    return destino
 
 
 def _confirm_terminal(prompt: str) -> bool:
