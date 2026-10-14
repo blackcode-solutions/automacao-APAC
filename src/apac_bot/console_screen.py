@@ -26,6 +26,8 @@ class TelaApac(str, Enum):
     LISTA = "LISTA"
     IDENTIFICACAO = "IDENTIFICACAO"
     PROCEDIMENTOS = "PROCEDIMENTOS"
+    DADOS_COMPLEMENTARES = "DADOS_COMPLEMENTARES"
+    SOLICITACAO = "SOLICITACAO"
     DESCONHECIDA = "DESCONHECIDA"
 
 
@@ -45,6 +47,24 @@ class CampoApac(str, Enum):
     SEXO = "SEXO"
     ETNIA_RACA = "ETNIA_RACA"
     MUNICIPIO = "MUNICIPIO"
+    COD_PROCEDIMENTO = "COD_PROCEDIMENTO"
+    CBO = "CBO"
+    QUANTIDADE = "QUANTIDADE"
+    CNS_EXECUTANTE = "CNS_EXECUTANTE"
+    EQUIPE = "EQUIPE"
+    SERVICO = "SERVICO"
+    CLASSIFICACAO = "CLASSIFICACAO"
+    MOTIVO_SAIDA = "MOTIVO_SAIDA"
+    DATA_ALTA = "DATA_ALTA"
+    CID_PRINCIPAL = "CID_PRINCIPAL"
+    CID_SECUNDARIO = "CID_SECUNDARIO"
+    CAUSAS_ASSOCIADAS = "CAUSAS_ASSOCIADAS"
+    CARATER_ATEND = "CARATER_ATEND"
+    CNS_SOLICITANTE = "CNS_SOLICITANTE"
+    CNS_AUTORIZADOR = "CNS_AUTORIZADOR"
+    DT_SOLICITACAO = "DT_SOLICITACAO"
+    DT_AUTORIZACAO = "DT_AUTORIZACAO"
+    COD_ORGAO_EMISS = "COD_ORGAO_EMISS"
     DESCONHECIDO = "DESCONHECIDO"
 
 
@@ -71,6 +91,47 @@ _ROTULOS_CAMPO: list[tuple[CampoApac, tuple[str, ...]]] = [
     (CampoApac.TELEFONE, ("TELEFONE", "DDD")),
     (CampoApac.EMAIL, ("EMAIL", "E-MAIL")),
     (CampoApac.MUNICIPIO, ("MUNICIPIO", "MUNICÍPIO", "IBGE")),
+    (
+        CampoApac.COD_PROCEDIMENTO,
+        (
+            "COD. PROCEDIMENTO",
+            "COD.PROCEDIMENTO",
+            "COD PROCEDIMENTO",
+            "CODIGO DO PROCEDIMENTO",
+        ),
+    ),
+    (CampoApac.CNS_EXECUTANTE, ("CNS EXECUTANTE", "CNS EXEC")),
+    (CampoApac.CLASSIFICACAO, ("CLASSIFICACAO", "CLASSIF.", "CLASSIF")),
+    (CampoApac.MOTIVO_SAIDA, ("MOTIVO SAIDA", "MOTIVO SAÍDA")),
+    (
+        CampoApac.DATA_ALTA,
+        (
+            "DATA ALTA/OBITO",
+            "DATA ALTA",
+            "MUDANCA PROCED",
+            "MUDANÇA PROCED",
+        ),
+    ),
+    (
+        CampoApac.CID_PRINCIPAL,
+        ("C.I.D. PRINCIPAL", "CID PRINCIPAL", "CID PRINC."),
+    ),
+    (CampoApac.CID_SECUNDARIO, ("SECUNDARIO",)),
+    (CampoApac.CAUSAS_ASSOCIADAS, ("CAUSAS ASSOCIADAS",)),
+    (CampoApac.CARATER_ATEND, ("CARATER ATEND", "CARATER ATEND.")),
+    (CampoApac.DT_SOLICITACAO, ("DT.SOLICITACAO", "DT SOLICITACAO")),
+    (CampoApac.DT_AUTORIZACAO, ("DT.AUTORIZACAO", "DT AUTORIZACAO")),
+    (
+        CampoApac.COD_ORGAO_EMISS,
+        ("COD.ORGAO EMISS", "COD.ORGAO", "COD ORGAO EMISS"),
+    ),
+    # Apos CNS EXECUTANTE — "CNS" sozinho na tela SOLICITACAO
+    (CampoApac.CNS_SOLICITANTE, ("CNS",)),
+    (CampoApac.CNS_AUTORIZADOR, ("CNS",)),
+    (CampoApac.QUANTIDADE, ("QUANTIDADE", "QUANT.")),
+    (CampoApac.SERVICO, ("SERVICO", "SERVIÇO")),
+    (CampoApac.EQUIPE, ("EQUIPE",)),
+    (CampoApac.CBO, ("C.B.O.", "CBO")),
     (CampoApac.SEXO, ("SEXO",)),
     (CampoApac.CEP, ("CEP",)),
     (CampoApac.NUMERO, ("NUMERO", "NÚMERO")),
@@ -271,6 +332,42 @@ _MARCAS_VALOR: dict[CampoApac, tuple[str, ...]] = {
     # RACA fica na linha do MUNICIPIO; ETNIA na linha do nascimento
     CampoApac.ETNIA_RACA: ("RACA", "RAÇA", "ETNIA"),
     CampoApac.MUNICIPIO: ("MUNICIPIO", "MUNICÍPIO"),
+    CampoApac.COD_PROCEDIMENTO: (
+        "COD. PROCEDIMENTO",
+        "COD.PROCEDIMENTO",
+        "COD PROCEDIMENTO",
+        "CODIGO DO PROCEDIMENTO",
+    ),
+    CampoApac.CBO: ("C.B.O.", "CBO"),
+    CampoApac.QUANTIDADE: ("QUANTIDADE", "QUANT."),
+    CampoApac.CNS_EXECUTANTE: ("CNS EXECUTANTE", "CNS EXEC"),
+    CampoApac.EQUIPE: ("EQUIPE",),
+    CampoApac.SERVICO: ("SERVICO", "SERVIÇO"),
+    CampoApac.CLASSIFICACAO: ("CLASSIFICACAO", "CLASSIF.", "CLASSIF"),
+    CampoApac.MOTIVO_SAIDA: ("MOTIVO SAIDA", "MOTIVO SAÍDA"),
+    CampoApac.DATA_ALTA: (
+        "DATA ALTA/OBITO",
+        "DATA ALTA",
+        "MUDANCA PROCED",
+        "MUDANÇA PROCED",
+    ),
+    CampoApac.CID_PRINCIPAL: (
+        "C.I.D. PRINCIPAL",
+        "CID PRINCIPAL",
+        "CID PRINC.",
+    ),
+    CampoApac.CID_SECUNDARIO: ("SECUNDARIO",),
+    CampoApac.CAUSAS_ASSOCIADAS: ("CAUSAS ASSOCIADAS",),
+    CampoApac.CARATER_ATEND: ("CARATER ATEND", "CARATER ATEND."),
+    CampoApac.CNS_SOLICITANTE: ("CNS",),
+    CampoApac.CNS_AUTORIZADOR: ("CNS",),
+    CampoApac.DT_SOLICITACAO: ("DT.SOLICITACAO", "DT SOLICITACAO"),
+    CampoApac.DT_AUTORIZACAO: ("DT.AUTORIZACAO", "DT AUTORIZACAO"),
+    CampoApac.COD_ORGAO_EMISS: (
+        "COD.ORGAO EMISS",
+        "COD.ORGAO",
+        "COD ORGAO EMISS",
+    ),
 }
 
 
@@ -429,6 +526,13 @@ def identificar_campo_linha(linha: str, cursor_x: int | None = None) -> CampoApa
             return CampoApac.EMAIL
         return CampoApac.TELEFONE
 
+    # Linha QUANTIDADE + CNS EXECUTANTE (print: mesma linha horizontal)
+    if "QUANTIDADE" in upper and "CNS" in upper:
+        pos_cns = raw_u.find("CNS")
+        if cursor_x is not None and pos_cns >= 0 and cursor_x >= pos_cns:
+            return CampoApac.CNS_EXECUTANTE
+        return CampoApac.QUANTIDADE
+
     # Linha MUNICIPIO + RACA (print real — RACA NAO e ETNIA da linha de baixo)
     if "MUNICIPIO" in upper and ("RACA" in upper or "RAÇA" in upper):
         pos_raca = max(raw_u.find("RACA"), raw_u.find("RAÇA"))
@@ -468,6 +572,12 @@ def identificar_campo_linha(linha: str, cursor_x: int | None = None) -> CampoApa
                     or "RESPONSÁVEL" in upper
                     or "NOME DO RES" in upper
                 ):
+                    continue
+                # CNS generico da SOLICITACAO vs CNS EXECUTANTE
+                if campo in (
+                    CampoApac.CNS_SOLICITANTE,
+                    CampoApac.CNS_AUTORIZADOR,
+                ) and ("CNS EXEC" in upper or "CNS EXECUTANTE" in upper):
                     continue
                 # NUMERO generico vs NUMERO APAC no cabecalho — ok na identificacao
                 achados.append((pos, campo, len(m)))
@@ -520,6 +630,10 @@ def identificar_campo_linha(linha: str, cursor_x: int | None = None) -> CampoApa
         return CampoApac.ENDERECO
     if CampoApac.TELEFONE in campos and CampoApac.EMAIL in campos:
         return CampoApac.TELEFONE
+    if CampoApac.QUANTIDADE in campos and CampoApac.CNS_EXECUTANTE in campos:
+        return CampoApac.QUANTIDADE
+    if CampoApac.MOTIVO_SAIDA in campos and CampoApac.DATA_ALTA in campos:
+        return CampoApac.MOTIVO_SAIDA
     if CampoApac.NASCIMENTO in campos or (
         _RE_DATA_INICIO.match(t) and CampoApac.SEXO in campos
     ):
@@ -552,11 +666,16 @@ def campo_compativel(
         return any(m in upper for m in marcas)
 
     if esperado == CampoApac.ETNIA_RACA and _tem("ETNIA", "RACA", "RAÇA"):
-        # MUNICIPIO+RACA: so aceita se o cx ja apontou RACA (nao digitar no IBGE)
-        if "MUNICIPIO" in upper:
+        # MUNICIPIO+RACA ou NASCIMENTO|SEXO|ETNIA: so com cx no ETNIA/RACA
+        if "MUNICIPIO" in upper or _tem("NASCIMENTO", "SEXO") or _tem(
+            "DATA DE NASC"
+        ):
             return atual == CampoApac.ETNIA_RACA
         return True
     if esperado == CampoApac.SEXO and "SEXO" in upper:
+        # Linha NASCIMENTO|SEXO|ETNIA: so aceita se cx ja apontou SEXO
+        if _tem("NASCIMENTO", "DATA DE NASC") or _tem("ETNIA", "RACA", "RAÇA"):
+            return atual == CampoApac.SEXO
         return True
     if esperado == CampoApac.NASCIMENTO and (
         "NASCIMENTO" in upper or _RE_DATA_INICIO.match(_linha_limpa_campo(linha))
@@ -590,6 +709,76 @@ def campo_compativel(
     if esperado == CampoApac.MUNICIPIO and "MUNICIPIO" in upper:
         if _tem("RACA", "RAÇA"):
             return atual == CampoApac.MUNICIPIO
+        return True
+    if esperado == CampoApac.COD_PROCEDIMENTO:
+        if "PROCEDIMENTO" in upper or "COD.PROCEDIMENTO" in upper:
+            return True
+        # Foco default na tela: linha so com mascara (.. . . -) sem rotulo
+        if atual in (CampoApac.COD_PROCEDIMENTO, CampoApac.DESCONHECIDO):
+            if not upper or re.fullmatch(r"[\d.\-\s/]*", upper):
+                return True
+        return False
+    if esperado == CampoApac.CBO and _tem("C.B.O.", "CBO"):
+        return True
+    if esperado == CampoApac.QUANTIDADE and _tem("QUANTIDADE", "QUANT."):
+        # Mesma linha que CNS: so aceita se o cx ja apontou QUANTIDADE
+        if "CNS" in upper:
+            return atual == CampoApac.QUANTIDADE
+        return True
+    if esperado == CampoApac.CNS_EXECUTANTE and "CNS" in upper:
+        # Mesma linha que QUANTIDADE: nao digitar CNS no campo quantidade
+        if _tem("QUANTIDADE", "QUANT."):
+            return atual == CampoApac.CNS_EXECUTANTE
+        return True
+    if esperado == CampoApac.EQUIPE and "EQUIPE" in upper:
+        return True
+    if esperado == CampoApac.SERVICO and _tem("SERVICO", "SERVIÇO"):
+        return True
+    if esperado == CampoApac.CLASSIFICACAO and _tem(
+        "CLASSIFICACAO", "CLASSIF.", "CLASSIF"
+    ):
+        return True
+    if esperado == CampoApac.MOTIVO_SAIDA and _tem(
+        "MOTIVO SAIDA", "MOTIVO SAÍDA"
+    ):
+        if _tem("DATA ALTA", "DATA ALTA/OBITO"):
+            return atual == CampoApac.MOTIVO_SAIDA
+        return True
+    if esperado == CampoApac.DATA_ALTA and _tem(
+        "DATA ALTA", "DATA ALTA/OBITO", "MUDANCA PROCED", "MUDANÇA PROCED"
+    ):
+        if _tem("MOTIVO SAIDA", "MOTIVO SAÍDA"):
+            return atual == CampoApac.DATA_ALTA
+        return True
+    if esperado == CampoApac.CID_PRINCIPAL and _tem(
+        "C.I.D. PRINCIPAL", "CID PRINCIPAL", "CID PRINC."
+    ):
+        return True
+    if esperado == CampoApac.CID_SECUNDARIO and "SECUNDARIO" in upper:
+        return True
+    if esperado == CampoApac.CAUSAS_ASSOCIADAS and "CAUSAS ASSOCIADAS" in upper:
+        return True
+    if esperado == CampoApac.CARATER_ATEND and "CARATER ATEND" in upper:
+        return True
+    if esperado in (
+        CampoApac.CNS_SOLICITANTE,
+        CampoApac.CNS_AUTORIZADOR,
+    ) and "CNS" in upper:
+        # Nao confundir com CNS EXECUTANTE da tela PROCEDIMENTOS
+        if "CNS EXEC" in upper or "CNS EXECUTANTE" in upper:
+            return False
+        return True
+    if esperado == CampoApac.DT_SOLICITACAO and _tem(
+        "DT.SOLICITACAO", "DT SOLICITACAO"
+    ):
+        return True
+    if esperado == CampoApac.DT_AUTORIZACAO and _tem(
+        "DT.AUTORIZACAO", "DT AUTORIZACAO"
+    ):
+        return True
+    if esperado == CampoApac.COD_ORGAO_EMISS and _tem(
+        "COD.ORGAO EMISS", "COD.ORGAO", "COD ORGAO EMISS"
+    ):
         return True
     if esperado == CampoApac.RESPONSAVEL and (
         "RESPONSAVEL" in upper
@@ -739,10 +928,24 @@ def classificar_tela(texto: str) -> TelaApac:
         return TelaApac.DESCONHECIDA
     upper = t.upper()
 
+    # Antes de PROCEDIMENTOS: "CID PRINC" tambem aparece em DADOS COMPLEMENTARES
+    if "DADOS COMPLEMENTARES" in upper:
+        return TelaApac.DADOS_COMPLEMENTARES
+
+    if (
+        "SOLICITACAO" in upper
+        and ("AUTORIZACAO" in upper or "AUTORIZAÇÃO" in upper)
+    ) or "CARATER ATEND" in upper:
+        return TelaApac.SOLICITACAO
+
     if (
         "PROCEDIMENTOS REALIZADOS" in upper
         or "COD.PROCEDIMENTO" in upper
-        or "CID PRINC" in upper
+        or (
+            "CID PRINC" in upper
+            and "DADOS COMPLEMENTARES" not in upper
+            and "C.I.D. PRINCIPAL" not in upper
+        )
         or _RE_COD_PROCEDIMENTO.search(t)
     ):
         return TelaApac.PROCEDIMENTOS
@@ -755,6 +958,7 @@ def classificar_tela(texto: str) -> TelaApac:
             "A.P.A.C" in upper
             and "ATUALIZ" not in upper
             and "IDENTIFIC" not in upper
+            and "SOLICITACAO" not in upper
         )
     ):
         return TelaApac.MENU

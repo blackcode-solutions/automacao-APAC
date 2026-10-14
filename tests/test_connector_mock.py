@@ -78,3 +78,50 @@ def test_resolver_ambiguidade_nenhum_com_cpf():
     assert paciente is None
     assert motivo is not None
     assert "nenhum com CPF" in motivo
+
+
+def test_resolver_ambiguidade_por_prontuario():
+    """Dois com CPF + prontuario → escolhe o id correspondente."""
+    c = MockBiodataConnector()
+    lanc = _lanc("PACIENTE AMBIGUO")
+    lanc.prontuario = "2001"  # digitos de BIO-2001
+    paciente, motivo = resolver_paciente(c, lanc)
+    assert motivo is None
+    assert paciente is not None
+    assert paciente.id_paciente == "BIO-2001"
+
+
+def test_buscar_nome_filtra_prontuario():
+    c = MockBiodataConnector()
+    res = c.buscar_por_nome("PACIENTE AMBIGUO", prontuario="2002")
+    assert len(res) == 1
+    assert res[0].id_paciente == "BIO-2002"
+
+
+def test_resolver_prioriza_busca_por_prontuario():
+    """Com prontuario, resolve direto (sem ambiguidade por nome)."""
+    c = MockBiodataConnector()
+    lanc = _lanc("PACIENTE AMBIGUO")
+    lanc.prontuario = "2001"
+    paciente, motivo = resolver_paciente(c, lanc)
+    assert motivo is None
+    assert paciente is not None
+    assert paciente.id_paciente == "BIO-2001"
+
+
+def test_buscar_por_prontuario_direto():
+    c = MockBiodataConnector()
+    p = c.buscar_por_prontuario("2002")
+    assert p is not None
+    assert p.id_paciente == "BIO-2002"
+    assert c.buscar_por_prontuario("999999") is None
+
+
+def test_resolver_prontuario_inexistente_fallback_nome_ambiguo():
+    c = MockBiodataConnector()
+    lanc = _lanc("PACIENTE AMBIGUO")
+    lanc.prontuario = "999999"
+    paciente, motivo = resolver_paciente(c, lanc)
+    assert paciente is None
+    assert motivo is not None
+    assert "ambígua" in motivo

@@ -42,23 +42,59 @@ def validate_all(cfg: AppConfig, planilha: Optional[Path] = None) -> list[Lancam
 
 def resolver_paciente(connector, lanc: Lancamento) -> tuple[Optional[PacienteDados], Optional[str]]:
     """
-    Prioriza ID_PACIENTE. Por nome:
-      - 1 resultado → usa
-      - varios: exatamente 1 com CPF → usa esse; 2+ ou 0 com CPF → ambígua
-    No BIODATA a busca ambígua para ao achar o 1º cadastro com CPF (não abre os demais).
+    Ordem:
+      1) prontuario (2a planilha) — busca pelo numero no dialogo
+      2) id_paciente
+      3) nome (+ desambiguacao CPF / prontuario)
     Retorna (paciente|None, motivo_revisao|None).
     """
+    pront = "".join(ch for ch in str(lanc.prontuario or "") if ch.isdigit())
+    if pront:
+        log.info("Buscando BIODATA por prontuario=%s", pront)
+        buscar_pront = getattr(connector, "buscar_por_prontuario", None)
+        encontrado = (
+            buscar_pront(pront)
+            if callable(buscar_pront)
+            else connector.buscar_por_id(pront)
+        )
+        if encontrado is not None:
+            return encontrado, None
+        log.warning(
+            "Prontuario %s nao encontrado — fallback busca por nome (%s).",
+            pront,
+            lanc.paciente_nome,
+        )
+
     if lanc.id_paciente:
         encontrado = connector.buscar_por_id(lanc.id_paciente)
         if encontrado is None:
             return None, "id_paciente não encontrado na origem"
         return encontrado, None
 
-    candidatos = connector.buscar_por_nome(lanc.paciente_nome)
+    candidatos = connector.buscar_por_nome(
+        lanc.paciente_nome,
+        prontuario=lanc.prontuario,
+    )
     if not candidatos:
         return None, "nome não encontrado na origem"
     if len(candidatos) == 1:
         return candidatos[0], None
+
+    # Filtro extra se o connector nao desambiguou (ex.: mock sem digitos no id)
+    if pront:
+        por_pront = [
+            p
+            for p in candidatos
+            if p.id_paciente
+            and "".join(ch for ch in p.id_paciente if ch.isdigit()) == pront
+        ]
+        if len(por_pront) == 1:
+            log.info(
+                "Desambiguação por prontuario %s — 1 de %s candidato(s).",
+                pront,
+                len(candidatos),
+            )
+            return por_pront[0], None
 
     com_cpf = [p for p in candidatos if tem_cpf_valido(p.cpf)]
     if len(com_cpf) == 1:

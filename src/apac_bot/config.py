@@ -78,6 +78,11 @@ class AppConfig:
         return dict(self.raw["planilha"]["colunas"])
 
     @property
+    def planilha_prontuarios(self) -> dict[str, Any]:
+        """Config da 2a planilha (Cliente/Prontuario) para desambiguacao BIODATA."""
+        return dict(self.raw.get("planilha_prontuarios") or {})
+
+    @property
     def normalizacao(self) -> dict[str, Any]:
         return dict(self.raw.get("normalizacao") or {})
 

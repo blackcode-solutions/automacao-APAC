@@ -27,6 +27,11 @@ class PacienteDados:
     nascimento: Optional[str] = None
     sexo: Optional[str] = None  # M ou F quando normalizado
     endereco: Optional[str] = None
+    cep: Optional[str] = None
+    logradouro: Optional[str] = None
+    bairro: Optional[str] = None
+    numero: Optional[str] = None
+    complemento: Optional[str] = None
 
     def campos_preenchidos(self) -> dict[str, str]:
         return {k: v for k, v in asdict(self).items() if v is not None and v != ""}
@@ -42,6 +47,7 @@ class Lancamento:
     auditor: str
     paciente_nome: str
     id_paciente: Optional[str] = None
+    prontuario: Optional[str] = None  # ID clinica (2a planilha) p/ desambiguar BIODATA
     quant: Optional[str] = None
     competencia: Optional[str] = None
     validade: Optional[str] = None
@@ -66,6 +72,7 @@ class Lancamento:
             self.auditor or "",
             self.paciente_nome or "",
             self.id_paciente or "",
+            self.prontuario or "",
             self.quant or "",
             self.competencia or "",
             self.validade or "",

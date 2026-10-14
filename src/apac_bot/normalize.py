@@ -1,6 +1,25 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any, Optional
+
+# Mais especifico primeiro (TRAVESSA antes de RUA; AVENIDA antes de AV).
+_TIPOS_LOGRADOURO: tuple[str, ...] = (
+    "TRAVESSA",
+    "AVENIDA",
+    "ALAMEDA",
+    "POVOADO",
+    "ESTRADA",
+    "RODOVIA",
+    "PRACA",
+    "VIELA",
+    "BECO",
+    "LARGO",
+    "RUA",
+    "TV",
+    "AV",
+)
 
 
 def cell_as_text(value: Any) -> str:
@@ -109,3 +128,30 @@ def nascimento_ddmmaaaa(value: Optional[str]) -> Optional[str]:
     if digits[:2] in {"19", "20"}:
         return digits[6:8] + digits[4:6] + digits[0:4]
     return digits
+
+
+def _sem_acento_upper(texto: str) -> str:
+    t = unicodedata.normalize("NFKD", (texto or "").strip())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return t.upper()
+
+
+def tipo_logradouro_do_endereco(endereco: Optional[str]) -> Optional[str]:
+    """
+    Detecta tipo de logradouro no texto do Endereco BIODATA (palavra inteira).
+    Ex.: 'SEGUNDA TRAVESSA BOM JESSUS' -> 'TRAVESSA'.
+    """
+    if not (endereco or "").strip():
+        return None
+    norm = _sem_acento_upper(endereco)
+    # Tokens alfanumericos (ignora pontuacao)
+    tokens = set(re.findall(r"[A-Z0-9]+", norm))
+    for tipo in _TIPOS_LOGRADOURO:
+        if tipo in tokens:
+            # TV/AV sao abreviaturas; preferir forma longa na busca F1
+            if tipo == "TV":
+                return "TRAVESSA"
+            if tipo == "AV":
+                return "AVENIDA"
+            return tipo
+    return None

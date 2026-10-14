@@ -11,8 +11,16 @@ class OrigemConnector(Protocol):
         """Retorna o paciente pelo identificador único, ou None se não encontrado."""
         ...
 
-    def buscar_por_nome(self, nome: str) -> list[PacienteDados]:
-        """Retorna todos os candidatos pelo nome. Ambiguidade = mais de um."""
+    def buscar_por_prontuario(self, prontuario: str) -> Optional[PacienteDados]:
+        """Busca pelo prontuario/ID clinico no dialogo de pesquisa."""
+        ...
+
+    def buscar_por_nome(
+        self,
+        nome: str,
+        prontuario: Optional[str] = None,
+    ) -> list[PacienteDados]:
+        """Retorna candidatos pelo nome. prontuario opcional desambigua."""
         ...
 
     def close(self) -> None:

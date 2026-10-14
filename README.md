@@ -65,7 +65,7 @@ Edite `config.json`:
 | `sistema_origem` | `mock` (padrão) ou `biodata` |
 | `planilha.*` | Caminho, aba, `linha_cabecalho`, `apenas_ativos` e mapeamento de colunas |
 | `normalizacao` | Hífen→barra na numeração; zeros no código (só se configurado) |
-| `dados_fixos` | Fixos por clínica: `cnes_*`, `tipo_apac` (`1` ou `3`; UI futura) |
+| `dados_fixos` | Por clínica / stub da UI: `cnes_*`, `tipo_apac`; procedimentos: `codigo_procedimento` e `cns_executante` (**dinâmicos** na UI futura), `cbo` (fixo), `quantidade_procedimento` (sempre `1`) |
 | `biodata.locators` | Seletores Playwright — `null` bloqueia consulta real |
 | `apac.usar_navegacao_inicial` | Menu → 2 Enter até a lista (uma vez por sessão) |
 | `apac.usar_conhost` | `true` (padrão) = abre o APAC no console clássico para ler o buffer da tela |
@@ -80,6 +80,8 @@ Edite `config.json`:
 | `apac.permitir_salvar` | Deve permanecer `false` até o save estar mapeado |
 
 A automação lê o **buffer do console** (não só clipboard) para saber a tela (MENU, LISTA, IDENTIFICACAO, PROCEDIMENTOS) e o **rótulo do campo** na linha do cursor. Se a tela ou o campo não for o esperado, o bot **para** — não digita nem dá Tab no campo errado. Se falhar o rótulo, rode `dump-apac-screen` nesse campo e ajuste os marcadores em `console_screen.py`.
+
+Na tela **PROCEDIMENTOS**, o `open-apac` preenche até Classificação e para antes do CID: código/CNS vêm de `dados_fixos` (dinâmicos na UI futura; se `codigo_procedimento` estiver vazio, usa o COD da planilha); CBO e quantidade são fixos; Equipe fica vazia (Tab); Serviço/Classif. só Tab sem sobrescrever.
 
 Não coloque senhas no JSON. O login no BIODATA é manual, em perfil de navegador dedicado (`browser_profile/`).
 

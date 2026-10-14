@@ -6,13 +6,14 @@ import os
 import re
 import subprocess
 import time
+import unicodedata
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from apac_bot.config import AppConfig
+from apac_bot.config import AppConfig, config_dir, resolve_path
 from apac_bot.connectors import BiodataMappingError, build_connector
 from apac_bot.console_screen import (
     CampoApac,
@@ -51,6 +52,9 @@ _TIMINGS_SEGURO: dict[str, float] = {
     "pos_tecla_foco": 0.12,
     "pos_nav_retry": 1.8,
     "pos_apos_ensure": 1.0,
+    "pos_proc_digitar": 0.4,
+    "pos_proc_tab": 0.45,
+    "pos_f1": 0.8,
 }
 _TIMINGS_RAPIDO: dict[str, float] = {
     "pre_campo": 0.25,
@@ -75,6 +79,9 @@ _TIMINGS_RAPIDO: dict[str, float] = {
     "pos_tecla_foco": 0.06,
     "pos_nav_retry": 0.6,
     "pos_apos_ensure": 0.4,
+    "pos_proc_digitar": 0.12,
+    "pos_proc_tab": 0.15,
+    "pos_f1": 0.35,
 }
 _timings_ativos: dict[str, float] = dict(_TIMINGS_SEGURO)
 
@@ -112,9 +119,14 @@ _ROTULO_PARA_CAMPO: dict[str, CampoApac] = {
     "RACA/ETNIA": CampoApac.ETNIA_RACA,
 }
 from apac_bot.logging_safe import setup_logging
-from apac_bot.models import Lancamento
-from apac_bot.normalize import nascimento_ddmmaaaa, sexo_para_apac
-from apac_bot.sheet import SheetError, resolver_lancamento_inicio
+from apac_bot.models import EstadoLancamento, Lancamento
+from apac_bot.normalize import (
+    nascimento_ddmmaaaa,
+    sexo_para_apac,
+    tipo_logradouro_do_endereco,
+)
+from apac_bot.progress import ProgressStore, filtrar_pendentes_lote
+from apac_bot.sheet import SheetError, listar_lancamentos_a_partir
 
 log = setup_logging()
 
@@ -134,6 +146,13 @@ def datas_validade_mes_anterior(hoje: Optional[date] = None) -> tuple[str, str]:
         primeiro_mes_ant.strftime("%d%m%Y"),
         fim.strftime("%d%m%Y"),
     )
+
+
+def _nome_profissional_f1(nome: str) -> str:
+    """Nome para busca A-Z no menu F1 (maiusculo, sem acento)."""
+    t = unicodedata.normalize("NFKD", (nome or "").strip())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return t.upper()
 
 
 def buscar_paciente_biodata(connector, lanc: Lancamento) -> str:
@@ -168,19 +187,33 @@ def buscar_paciente_biodata(connector, lanc: Lancamento) -> str:
 
 
 def refrescar_paciente_biodata(connector, lanc: Lancamento) -> None:
-    """Reconsulta o cadastro no BIODATA ja aberto (sem novo login)."""
-    from apac_bot.pipeline import resolver_paciente
-
-    paciente, motivo = resolver_paciente(connector, lanc)
-    if motivo or paciente is None:
+    """
+    Relê o cadastro ja aberto no BIODATA (sem Pesquisar / prontuario de novo).
+    """
+    ler = getattr(connector, "ler_cadastro_aberto", None)
+    if not callable(ler):
         log.warning(
-            "BIODATA: falha ao refrescar paciente %s: %s",
+            "BIODATA: connector sem ler_cadastro_aberto — mantem cache de %s",
             lanc.paciente_nome,
-            motivo or "vazio",
+        )
+        return
+    try:
+        paciente = ler()
+    except Exception as exc:
+        log.warning(
+            "BIODATA: falha ao ler cadastro aberto de %s: %s",
+            lanc.paciente_nome,
+            exc,
+        )
+        return
+    if paciente is None:
+        log.warning(
+            "BIODATA: cadastro aberto vazio ao refrescar %s",
+            lanc.paciente_nome,
         )
         return
     lanc.paciente = paciente
-    log.info("BIODATA: dados do paciente atualizados (nascimento/sexo).")
+    log.info("BIODATA: dados do paciente atualizados (cadastro aberto).")
 
 
 DEFAULT_APAC_EXE = Path(r"C:\APAC\APAC.exe")
@@ -277,6 +310,7 @@ def classe_hwnd(hwnd: int) -> str:
 VK_RETURN = 0x0D
 VK_TAB = 0x09
 VK_INSERT = 0x2D
+VK_F1 = 0x70
 VK_CONTROL = 0x11
 VK_SHIFT = 0x10
 VK_HOME = 0x24
@@ -290,10 +324,11 @@ WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 KEYEVENTF_KEYUP = 0x0002
 CF_UNICODETEXT = 13
-# scan codes: Enter 0x1C, Tab 0x0F, Insert 0x52
+# scan codes: Enter 0x1C, Tab 0x0F, Insert 0x52, F1 0x3B
 _SCAN_ENTER = 0x1C
 _SCAN_TAB = 0x0F
 _SCAN_INSERT = 0x52
+_SCAN_F1 = 0x3B
 # Evita Enter duplicado (vazamento do terminal + keybd_event) em sequência rápida
 _LAST_ENTER_MONO = 0.0
 _ENTER_COOLDOWN_S = 0.6
@@ -440,6 +475,13 @@ def enviar_tab_hwnd(hwnd: int) -> None:
     """Envia Tab para a janela do APAC (avança campo sem validar tela)."""
     aguardar_enter_solto(timeout_s=timing_apac("enter_solto_timeout_curto", 1.0))
     enviar_tecla_hwnd(hwnd, VK_TAB, _SCAN_TAB, nome="Tab")
+    time.sleep(timing_apac("pos_home", 0.1))
+
+
+def enviar_f1_hwnd(hwnd: int) -> None:
+    """Envia F1 (ajuda/lista de opcoes) para a janela do APAC."""
+    aguardar_enter_solto(timeout_s=timing_apac("enter_solto_timeout_curto", 1.0))
+    enviar_tecla_hwnd(hwnd, VK_F1, _SCAN_F1, nome="F1")
     time.sleep(timing_apac("pos_home", 0.1))
 
 
@@ -751,6 +793,45 @@ class ApacInterruptedError(Exception):
         self.durante_salvamento = durante_salvamento
 
 
+def decidir_acao_equipe(campo: CampoApac) -> str:
+    """
+    Decisao pura apos CNS: o que fazer no passo Equipe.
+    - tab: foco em EQUIPE → 1 Tab
+    - ja_pulada: Magnético ja pulou (SERVICO/CLASSIFICACAO)
+    - avancar: ainda atras (ex. CNS) → Tab e rele
+    """
+    if campo == CampoApac.EQUIPE:
+        return "tab"
+    if campo in (CampoApac.SERVICO, CampoApac.CLASSIFICACAO):
+        return "ja_pulada"
+    return "avancar"
+
+
+def decidir_acao_servico(campo: CampoApac) -> str:
+    """
+    Decisao pura no passo Servico.
+    - tab: foco em SERVICO → 1 Tab (aceitar)
+    - ja_ok: ja em CLASSIFICACAO (servico ultrapassado)
+    - avancar: atras → Tab e rele
+    """
+    if campo == CampoApac.SERVICO:
+        return "tab"
+    if campo == CampoApac.CLASSIFICACAO:
+        return "ja_ok"
+    return "avancar"
+
+
+def decidir_acao_classificacao(campo: CampoApac) -> str:
+    """
+    Decisao pura no passo Classificacao.
+    - tab: foco em CLASSIFICACAO → aceitar (Enter no Magnético; CID a seguir)
+    - avancar: atras → Tab e rele
+    """
+    if campo == CampoApac.CLASSIFICACAO:
+        return "tab"
+    return "avancar"
+
+
 @dataclass
 class ApacStepResult:
     ok: bool
@@ -861,8 +942,59 @@ class ApacAutomator:
         self._nascimento_aceito = False
         self._sexo_aceito = False
         self._raca_aceito = False
+        self._procedimentos_tela_ok = False
+        self._cod_procedimento_preenchido = False
+        self._cbo_preenchido = False
+        self._qtd_procedimento_preenchida = False
+        self._cns_executante_preenchido = False
+        self._equipe_pulada = False
+        self._servico_aceito = False
+        self._classificacao_aceita = False
+        self._motivo_saida_preenchido = False
+        self._data_alta_preenchida = False
+        self._cid_complementares_ok = False
+        self._solicitacao_ok = False
         self._proc: Optional[subprocess.Popen] = None
         self._biodata_connector = None
+
+    def _reiniciar_flags_paciente(self) -> None:
+        """Zera flags de um paciente para permitir Insert + preenchimento do proximo."""
+        self._insert_inclusao_feito = False
+        self._numero_preenchido = False
+        self._cnes_preenchido = False
+        self._validade_preenchida = False
+        self._tipo_nacionalidade_feito = False
+        self._prontuario_sem_cpf_feito = False
+        self._cpf_preenchido = False
+        self._situacao_rua_feita = False
+        self._nome_aceito = False
+        self._cpf_preencheu_nome = False
+        self._nome_mae_aceito = False
+        self._nome_responsavel_aceito = False
+        self._cep_aceito = False
+        self._logradouro_aceito = False
+        self._endereco_aceito = False
+        self._numero_end_aceito = False
+        self._complemento_aceito = False
+        self._bairro_aceito = False
+        self._telefone_ddd_aceito = False
+        self._telefone_num_aceito = False
+        self._email_aceito = False
+        self._nascimento_aceito = False
+        self._sexo_aceito = False
+        self._raca_aceito = False
+        self._procedimentos_tela_ok = False
+        self._cod_procedimento_preenchido = False
+        self._cbo_preenchido = False
+        self._qtd_procedimento_preenchida = False
+        self._cns_executante_preenchido = False
+        self._equipe_pulada = False
+        self._servico_aceito = False
+        self._classificacao_aceita = False
+        self._motivo_saida_preenchido = False
+        self._data_alta_preenchida = False
+        self._cid_complementares_ok = False
+        self._solicitacao_ok = False
 
     def _pg(self):
         if self._pyautogui is None:
@@ -1083,6 +1215,11 @@ class ApacAutomator:
         alvo = hwnd or self._hwnd_apac_ativo()
         enviar_insert_hwnd(alvo)
 
+    def _enviar_f1(self, hwnd: Optional[int] = None) -> None:
+        """Envia F1 ao APAC (ajuda / 1a opcao do menu)."""
+        alvo = hwnd or self._hwnd_apac_ativo()
+        enviar_f1_hwnd(alvo)
+
     def _digitar_texto(
         self,
         texto: str,
@@ -1184,13 +1321,16 @@ class ApacAutomator:
     def exigir_tela(self, esperada: TelaApac, *, passo: str) -> str:
         """
         Le o buffer, classifica e aborta se nao for a tela esperada.
-        PROCEDIMENTOS sempre aborta com mensagem especifica.
+        Cair em PROCEDIMENTOS sem esperar essa tela ainda aborta.
         """
         if self.dry_run:
             log.info("[dry-run] exigir_tela %s no passo %s", esperada.value, passo)
             return ""
         tela, texto = self.classificar_tela_atual()
-        if tela == TelaApac.PROCEDIMENTOS:
+        if (
+            tela == TelaApac.PROCEDIMENTOS
+            and esperada != TelaApac.PROCEDIMENTOS
+        ):
             raise ApacBlockedError(
                 f"Passo '{passo}': tela e PROCEDIMENTOS REALIZADOS "
                 f"(preview: {preview_tela(texto)!r}). Pare — nao continuar."
@@ -1203,19 +1343,26 @@ class ApacAutomator:
             )
         return texto
 
-    def exigir_campo(self, esperado: CampoApac, *, passo: str) -> str:
+    def exigir_campo(
+        self,
+        esperado: CampoApac,
+        *,
+        passo: str,
+        tela: TelaApac = TelaApac.IDENTIFICACAO,
+    ) -> str:
         """
-        Exige IDENTIFICACAO e que a linha do cursor seja o campo esperado.
+        Exige a tela indicada e que a linha do cursor seja o campo esperado.
         Sem recuperacao (Shift+Tab). Retorna a linha lida.
         """
         if self.dry_run:
             log.info(
-                "[dry-run] exigir_campo %s no passo %s",
+                "[dry-run] exigir_campo %s (tela %s) no passo %s",
                 esperado.value,
+                tela.value,
                 passo,
             )
             return ""
-        self.exigir_tela(TelaApac.IDENTIFICACAO, passo=passo)
+        self.exigir_tela(tela, passo=passo)
         try:
             campo, linha, cx = identificar_campo_cursor(self._pids_apac())
         except ConsoleScreenError as exc:
@@ -1680,7 +1827,14 @@ class ApacAutomator:
 
         # Campos do APAC com linha “suja” no buffer: aceita valor isolado, sem barrar por len
         rotulo_u = rotulo.upper()
-        if rotulo_u in {"CEP", "DATA DE NASCIMENTO", "SEXO"}:
+        if rotulo_u in {
+            "CEP",
+            "LOGRADOURO",
+            "ENDERECO",
+            "NUMERO",
+            "DATA DE NASCIMENTO",
+            "SEXO",
+        }:
             if texto != (bruto or "").strip():
                 log.info("%s no APAC normalizado da linha: %r", rotulo, texto)
         elif len(texto) > max_chars:
@@ -1705,47 +1859,52 @@ class ApacAutomator:
             if origem:
                 # Clipboard falhou (texto branco comum): sobrescreve com BIODATA
                 digitar_antes = origem
-                origem_preview = origem
-                log.warning(
-                    "%s: clipboard vazio, mas BIODATA tem '%s' — redigita "
-                    "(Magnético avança sozinho, sem Tab).",
-                    rotulo,
-                    origem[:60],
-                )
-                motivo_avanco = "aceitar (redigitado; clipboard falhou)"
-            elif aceitar_enter_se_cpf_preencheu and self._cpf_preencheu_nome:
-                log.warning(
-                    "%s: clipboard vazio, mas CPF ja preencheu NOME — Tab para aceitar "
-                    "(texto branco no Magnético).",
-                    rotulo,
-                )
-                motivo_avanco = "aceitar (clipboard falhou; confia no CPF/APAC)"
-            elif vazio_digita is not None:
-                if not str(vazio_digita).strip():
-                    raise ApacBlockedError(
-                        f"{rotulo} vazio no APAC e sem valor na origem (BIODATA) "
-                        f"para '{lanc.paciente_nome}'."
+                if rotulo_u == "CEP":
+                    dig_cep = "".join(ch for ch in origem if ch.isdigit())
+                    digitar_antes = dig_cep[:8] if len(dig_cep) >= 8 else None
+                if digitar_antes:
+                    origem_preview = digitar_antes
+                    log.warning(
+                        "%s: clipboard vazio, mas BIODATA tem '%s' — redigita "
+                        "(Magnético avança sozinho, sem Tab).",
+                        rotulo,
+                        digitar_antes[:60],
                     )
-                digitar_antes = str(vazio_digita).strip()
-                log.info(
-                    "%s vazio — digitando valor da origem: %s",
-                    rotulo,
-                    digitar_antes[:40],
-                )
-                motivo_avanco = "aceitar (digitado)"
-            elif vazio_aceita_tab:
-                log.info("%s vazio — Tab para pular.", rotulo)
-                motivo_avanco = "pular (vazio)"
-            else:
-                log.warning(
-                    "%s vazio no APAC para %s — revisao.",
-                    rotulo,
-                    lanc.paciente_nome,
-                )
-                raise ApacBlockedError(
-                    f"{rotulo} vazio no APAC para '{lanc.paciente_nome}'. "
-                    "Preencha manualmente ou revise."
-                )
+                    motivo_avanco = "aceitar (redigitado; clipboard falhou)"
+            if not digitar_antes:
+                if aceitar_enter_se_cpf_preencheu and self._cpf_preencheu_nome:
+                    log.warning(
+                        "%s: clipboard vazio, mas CPF ja preencheu NOME — Tab para aceitar "
+                        "(texto branco no Magnético).",
+                        rotulo,
+                    )
+                    motivo_avanco = "aceitar (clipboard falhou; confia no CPF/APAC)"
+                elif vazio_digita is not None:
+                    if not str(vazio_digita).strip():
+                        raise ApacBlockedError(
+                            f"{rotulo} vazio no APAC e sem valor na origem (BIODATA) "
+                            f"para '{lanc.paciente_nome}'."
+                        )
+                    digitar_antes = str(vazio_digita).strip()
+                    log.info(
+                        "%s vazio — digitando valor da origem: %s",
+                        rotulo,
+                        digitar_antes[:40],
+                    )
+                    motivo_avanco = "aceitar (digitado)"
+                elif vazio_aceita_tab:
+                    log.info("%s vazio — Tab para pular.", rotulo)
+                    motivo_avanco = "pular (vazio)"
+                else:
+                    log.warning(
+                        "%s vazio no APAC para %s — revisao.",
+                        rotulo,
+                        lanc.paciente_nome,
+                    )
+                    raise ApacBlockedError(
+                        f"{rotulo} vazio no APAC para '{lanc.paciente_nome}'. "
+                        "Preencha manualmente ou revise."
+                    )
         else:
             log.info(
                 "%s preenchido no APAC: %s — %s.",
@@ -1787,9 +1946,39 @@ class ApacAutomator:
             self._pausa("pos_home")
             a_digitar = digitar_antes[:max_chars]
             self._digitar_texto(a_digitar, hwnd)
-            # Magnético: ao terminar de digitar, o foco já vai ao próximo — sem Tab
             self._pausa("pos_digitar")
-            log.info("%s: digitado sem Tab (avanco automatico do Magnético).", rotulo)
+            log.info("%s: digitado (origem BIODATA/planilha).", rotulo)
+            # Texto livre (NOME/MAE/end.) as vezes nao avanca sozinho — Tab se ainda no campo
+            if avancar_com_tab and campo_esp is not None:
+                try:
+                    campo_agora, linha_agora, _cx = identificar_campo_cursor(
+                        self._pids_apac()
+                    )
+                    if campo_compativel(
+                        campo_agora, campo_esp, linha=linha_agora
+                    ):
+                        log.info(
+                            "%s: ainda no mesmo campo apos digitar — Tab",
+                            rotulo,
+                        )
+                        hwnd = self._ativar_janela_apac(clicar_centro=False)
+                        self._enviar_tab(hwnd)
+                        enviou_tab = True
+                    else:
+                        log.info(
+                            "%s: Magnético ja avancou para %s",
+                            rotulo,
+                            campo_agora.value,
+                        )
+                except ConsoleScreenError as exc:
+                    log.warning(
+                        "%s: falha ao checar foco apos digitar (%s) — Tab",
+                        rotulo,
+                        exc,
+                    )
+                    hwnd = self._ativar_janela_apac(clicar_centro=False)
+                    self._enviar_tab(hwnd)
+                    enviou_tab = True
         elif avancar_com_tab:
             hwnd = self._ativar_janela_apac(clicar_centro=False)
             self._enviar_tab(hwnd)
@@ -1831,37 +2020,78 @@ class ApacAutomator:
         val = getattr(pac, attr, None) if pac else None
         return (str(val).strip() or None) if val else None
 
+    def _nome_para_digitar_apac(self, lanc: Lancamento) -> Optional[str]:
+        """Preferir nome da planilha; senao BIODATA sanitizado (nunca prontuario)."""
+        from apac_bot.sheet import sanitizar_nome_opcao
+
+        planilha = (lanc.paciente_nome or "").strip()
+        if planilha and not planilha.isdigit():
+            return planilha
+        bruto = self._valor_biodata_ou_refrescar(lanc, "nome", rotulo="NOME")
+        if not bruto:
+            return None
+        limpo = sanitizar_nome_opcao(bruto, lanc.prontuario)
+        return limpo or None
+
+    def _nome_mae_para_digitar_apac(self, lanc: Lancamento) -> Optional[str]:
+        """Mae do BIODATA; rejeita vazio ou igual ao nome do paciente."""
+        from apac_bot.sheet import nome_mae_valido
+
+        pac_nome = (lanc.paciente_nome or "").strip()
+        mae = self._valor_biodata_ou_refrescar(
+            lanc, "nome_mae", rotulo="NOME DA MAE"
+        )
+        if nome_mae_valido(mae, pac_nome):
+            return (mae or "").strip()
+        # Refresh ja pode ter ocorrido em _valor_biodata; tenta de novo se connector
+        if self._biodata_connector is not None and not nome_mae_valido(mae, pac_nome):
+            refrescar_paciente_biodata(self._biodata_connector, lanc)
+            mae = (
+                (lanc.paciente.nome_mae or "").strip() if lanc.paciente else None
+            )
+        if nome_mae_valido(mae, pac_nome):
+            return (mae or "").strip()
+        return None
+
     def aceitar_nome_se_preenchido(self, lanc: Lancamento) -> None:
-        """Apos SITUACAO DE RUA: aceita NOME se veio preenchido pelo CPF."""
+        """Apos SITUACAO DE RUA: aceita NOME se veio do CPF; senao digita planilha."""
+        digita = self._nome_para_digitar_apac(lanc)
+        if digita:
+            log.info("NOME a digitar (se APAC vazio): %r", digita[:80])
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="NOME",
             flag_attr="_nome_aceito",
             max_chars=120,
-            aceitar_enter_se_origem="nome",
+            vazio_digita=digita if digita else "",
             marcar_cpf_preencheu_se_lido=True,
         )
 
     def aceitar_nome_mae_se_preenchido(self, lanc: Lancamento) -> None:
-        """Apos NOME: aceita NOME DA MAE se preenchido (clipboard as vezes falha)."""
+        """Apos NOME: aceita MAE do APAC; se vazio digita BIODATA (nunca o nome do paciente)."""
+        digita = self._nome_mae_para_digitar_apac(lanc)
+        if digita:
+            log.info("NOME DA MAE a digitar (se APAC vazio): %r", digita[:80])
+        elif not self.dry_run:
+            # Se APAC tambem estiver vazio, _aceitar com vazio_digita="" bloqueia —
+            # mensagem clara se nao houver mae valida na origem
+            pass
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="NOME DA MAE",
             flag_attr="_nome_mae_aceito",
             max_chars=120,
-            aceitar_enter_se_origem="nome_mae",
-            aceitar_enter_se_cpf_preencheu=True,
+            vazio_digita=digita if digita else "",
         )
 
     def aceitar_nome_responsavel_se_preenchido(self, lanc: Lancamento) -> None:
-        """Apos NOME DA MAE: Tab se preenchido; se vazio, Tab para pular."""
+        """Apos NOME DA MAE: Tab se preenchido; se vazio, digita O MESMO."""
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="NOME DO RESPONSAVEL",
             flag_attr="_nome_responsavel_aceito",
             max_chars=120,
-            aceitar_enter_se_cpf_preencheu=True,
-            vazio_aceita_tab=True,
+            vazio_digita="O MESMO",
         )
 
     def _normalizar_leitura_campo(self, rotulo: str, texto: str) -> str:
@@ -1874,13 +2104,56 @@ class ApacAutomator:
             return ""
         ru = rotulo.upper()
         if ru == "CEP":
-            # Ex.: "65041235 LOGRADOURO : 0" -> "65041235"
+            # So CEP completo (8 digitos). "LOGRADOURO : 0" / "0" = vazio.
             m = re.match(r"^(\d{5}-?\d{3})\b", t)
             if m:
-                return m.group(1)
+                dig = "".join(ch for ch in m.group(1) if ch.isdigit())
+                return m.group(1) if len(dig) == 8 else ""
+            # Digitos no inicio da linha (antes de LOGRADOURO)
+            m2 = re.match(r"^(\d{8})\b", t)
+            if m2:
+                return m2.group(1)
+            if "LOGRADOURO" in t.upper():
+                # Valor do CEP esta a esquerda; se nao ha 8 digitos la, vazio
+                esq = t.upper().split("LOGRADOURO", 1)[0]
+                dig_esq = "".join(ch for ch in esq if ch.isdigit())
+                return dig_esq if len(dig_esq) == 8 else ""
             digitos = "".join(ch for ch in t if ch.isdigit())
-            if digitos:
-                return digitos[:8] if len(digitos) >= 8 else digitos
+            if len(digitos) == 8:
+                return digitos
+            return ""
+        if ru == "LOGRADOURO":
+            # Mascara vazia no Magnético costuma vir como "0"
+            if t in {"0", "00", ".", "-"} or not t:
+                return ""
+            if re.fullmatch(r"0+", t):
+                return ""
+            return t
+        if ru == "ENDERECO":
+            # Linha ENDERECO|NUMERO: buffer vazio vira "NUMERO:" / "NUMERO"
+            tu = t.upper().strip()
+            if re.fullmatch(r"N[UÚ]MERO\s*:?", tu):
+                return ""
+            if t in {".", "-", "0", "00"} or not t:
+                return ""
+            # Corta rotulo NUMERO a direita
+            partes = re.split(r"\s+N[UÚ]MERO\s*:?", t, maxsplit=1, flags=re.I)
+            esq = (partes[0] if partes else t).strip()
+            if not esq or re.fullmatch(r"N[UÚ]MERO\s*:?", esq, flags=re.I):
+                return ""
+            return esq
+        if ru == "NUMERO":
+            tu = t.upper().strip()
+            if re.fullmatch(r"N[UÚ]MERO\s*:?", tu):
+                return ""
+            if t in {"0", "00", ".", "-", ""} or not t:
+                return ""
+            if re.fullmatch(r"0+", t):
+                return ""
+            # Remove rotulo colado no inicio
+            m = re.match(r"^N[UÚ]MERO\s*:?\s*(.*)$", t, flags=re.I)
+            if m:
+                return (m.group(1) or "").strip()
             return t
         if ru == "DATA DE NASCIMENTO":
             # Ex.: "15/12/1975 SEXO: ETNIA :" -> "15/12/1975"
@@ -1892,14 +2165,29 @@ class ApacAutomator:
                 return m.group(1)
             # Corta no rotulo seguinte
             m2 = re.split(r"\s+(SEXO|ETNIA|RACA|RAÇA)\b", t, maxsplit=1, flags=re.I)
-            return (m2[0] if m2 else t).strip()
+            esq = (m2[0] if m2 else t).strip()
+            # Mascara vazia Magnético: "/ /" / "//" / so barras e espacos
+            so_mascara = re.sub(r"[\s/.\-]", "", esq)
+            if not so_mascara:
+                return ""
+            return esq
         if ru == "SEXO":
-            # Ex.: "M ETNIA :" ou "MASCULINO ..."
-            m = re.match(r"^([MFmf12])\b", t)
+            # So M/F/1/2. "ETNIA :" / "E" do rotulo seguinte = vazio
+            tu = t.upper().strip()
+            if re.match(r"^ETNIA\b", tu) or re.fullmatch(r"E", tu):
+                return ""
+            m = re.match(r"^([MF12])\b", tu)
             if m:
-                return m.group(1).upper()
+                return m.group(1)
             m2 = re.split(r"\s+(ETNIA|RACA|RAÇA)\b", t, maxsplit=1, flags=re.I)
-            return (m2[0] if m2 else t).strip()[:1].upper() if m2 else t
+            esq = (m2[0] if m2 else t).strip().upper()
+            if re.fullmatch(r"[MF12]", esq):
+                return esq
+            if esq.startswith("MASC"):
+                return "M"
+            if esq.startswith("FEM"):
+                return "F"
+            return ""
         if ru == "RACA":
             m = re.search(r"\bRACA\s*:?\s*(0?[1-5])\b", t, re.I)
             if m:
@@ -1919,39 +2207,194 @@ class ApacAutomator:
 
     def aceitar_cep_se_preenchido(self, lanc: Lancamento) -> None:
         """
-        CEP do APAC permanece — so Tab para aceitar (sem validar / sem redigitar).
+        CEP: Tab se preenchido (8 digitos); se vazio, digita BIODATA; se BIODATA vazio, Tab.
         """
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="CEP",
             flag_attr="_cep_aceito",
             max_chars=80,
+            aceitar_enter_se_origem="cep",
             vazio_aceita_tab=True,
         )
+        # Linha CEP+LOGRADOURO: se Tab nao tirou o foco do CEP, Tab extra 1x
+        if self.dry_run:
+            return
+        try:
+            campo, linha, _cx = identificar_campo_cursor(self._pids_apac())
+            if campo_compativel(campo, CampoApac.CEP, linha=linha):
+                log.info("CEP: ainda no CEP apos aceite — Tab extra")
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                self._enviar_tab(hwnd)
+                self._pausa("pos_tab_apos_aceitar")
+        except ConsoleScreenError as exc:
+            log.warning("CEP: falha ao checar foco pos-aceite: %s", exc)
+
+    def _selecionar_logradouro_f1(self, tipo: str) -> None:
+        """
+        LOGRADOURO so aceita codigo: F1 abre lista; digita tipo (TRAVESSA/RUA…);
+        Enter seleciona; Tab avanca ao proximo campo.
+        """
+        digitar = _nome_profissional_f1(tipo)
+        if not digitar:
+            raise ApacBlockedError("LOGRADOURO F1: tipo vazio.")
+
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("LOGRADOURO: F1 (lista) → filtrar %r", digitar)
+        self._enviar_f1(hwnd)
+        self._pausa("pos_f1")
+
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        self._digitar_texto(digitar, hwnd)
+        self._pausa("pos_digitar_curto")
+
+        log.info("LOGRADOURO: Enter (selecionar tipo %s)", digitar)
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("LOGRADOURO: Tab (avancar ao proximo campo)")
+        self._enviar_tab(hwnd)
+        self._pausa("pos_tab_apos_aceitar")
 
     def aceitar_logradouro_se_preenchido(self, lanc: Lancamento) -> None:
-        """Apos CEP: Tab se preenchido; se vazio, Tab para pular."""
-        self._aceitar_campo_texto_se_preenchido(
-            lanc,
-            rotulo="LOGRADOURO",
-            flag_attr="_logradouro_aceito",
-            max_chars=80,
-            vazio_aceita_tab=True,
+        """
+        Apos CEP: Tab se LOGRADOURO ja tem codigo; se vazio, F1 com tipo
+        detectado no Endereco BIODATA (RUA/TRAVESSA…); sem tipo → Tab.
+        """
+        if self._logradouro_aceito:
+            return
+
+        if self.dry_run:
+            end = (lanc.paciente.endereco if lanc.paciente else None) or ""
+            tipo = tipo_logradouro_do_endereco(end)
+            log.info(
+                "[dry-run] LOGRADOURO — Tab se preenchido; "
+                "vazio F1 tipo=%r a partir do endereco",
+                tipo,
+            )
+            self._logradouro_aceito = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                f"Verificar LOGRADOURO de {lanc.paciente_nome} (F1 se vazio)? digite s: "
+            )
+            if not ok:
+                raise ApacBlockedError(
+                    "operador recusou verificar LOGRADOURO no APAC"
+                )
+
+        self._pausa("pre_campo")
+        aguardar_enter_solto()
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        linha_gate = self.exigir_campo(CampoApac.LOGRADOURO, passo="LOGRADOURO")
+        bruto = (
+            extrair_valor_campo_linha(linha_gate, campo=CampoApac.LOGRADOURO)
+            or ""
+        ).strip()
+        texto = self._normalizar_leitura_campo("LOGRADOURO", bruto)
+        digitos = "".join(ch for ch in texto if ch.isdigit())
+        preenchido = bool(digitos)
+
+        if preenchido:
+            log.info(
+                "LOGRADOURO preenchido no APAC: %s — Tab.",
+                digitos[:20],
+            )
+            hwnd = self._ativar_janela_apac(clicar_centro=False)
+            self._enviar_tab(hwnd)
+            self._pausa("pos_tab_apos_aceitar")
+            self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab em LOGRADOURO")
+            self._logradouro_aceito = True
+            log.info("LOGRADOURO: Tab (aceitar) — proximo campo.")
+            return
+
+        endereco = (lanc.paciente.endereco if lanc.paciente else None) or ""
+        if not endereco.strip():
+            # Sem rebusca por prontuario; so relê cadastro aberto se connector ligado
+            endereco = (
+                self._valor_biodata_ou_refrescar(
+                    lanc, "endereco", rotulo="ENDERECO"
+                )
+                or ""
+            )
+        tipo = tipo_logradouro_do_endereco(endereco)
+        if tipo:
+            log.info(
+                "LOGRADOURO vazio — F1 com tipo %r (endereco=%r)",
+                tipo,
+                endereco[:60],
+            )
+            if self._confirmar_nav():
+                ok = self.confirm_fn(
+                    f"LOGRADOURO F1 '{tipo}' — digite s: "
+                )
+                if not ok:
+                    raise ApacBlockedError(
+                        "operador recusou F1 no LOGRADOURO"
+                    )
+            aguardar_enter_solto()
+            self._selecionar_logradouro_f1(tipo)
+            self.exigir_tela(
+                TelaApac.IDENTIFICACAO, passo="apos F1 LOGRADOURO"
+            )
+            # Recovery: lista F1 ainda aberta → Enter; se ainda no LOGRADOURO → Tab
+            try:
+                buf = (self.ler_tela_console() or "").upper()
+                if "ENTER=SELECIONA" in buf.replace(" ", ""):
+                    log.warning(
+                        "LOGRADOURO: lista F1 ainda aberta — Enter recovery"
+                    )
+                    hwnd = self._ativar_janela_apac(clicar_centro=False)
+                    self._enviar_enter(hwnd)
+                    self._pausa("pos_enter_form")
+                    hwnd = self._ativar_janela_apac(clicar_centro=False)
+                    self._enviar_tab(hwnd)
+                    self._pausa("pos_tab_apos_aceitar")
+            except ConsoleScreenError as exc:
+                log.warning("LOGRADOURO: checagem pos-F1 falhou: %s", exc)
+            self._logradouro_aceito = True
+            log.info("LOGRADOURO: F1 ok (%s) — proximo campo.", tipo)
+            return
+
+        log.warning(
+            "LOGRADOURO vazio e sem tipo no endereco %r — Tab.",
+            endereco[:60],
         )
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        self._enviar_tab(hwnd)
+        self._pausa("pos_tab_apos_aceitar")
+        self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab em LOGRADOURO")
+        self._logradouro_aceito = True
+        log.info("LOGRADOURO: Tab (pular) — proximo campo.")
 
     def aceitar_endereco_se_preenchido(self, lanc: Lancamento) -> None:
-        """Apos LOGRADOURO: Tab se preenchido; se vazio, Tab para pular."""
+        """Apos LOGRADOURO: Tab se preenchido; vazio digita BIODATA ou Tab."""
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="ENDERECO",
             flag_attr="_endereco_aceito",
             max_chars=120,
+            aceitar_enter_se_origem="endereco",
             vazio_aceita_tab=True,
         )
+        # Linha ENDERECO+NUMERO: se Tab nao tirou o foco do ENDERECO, Tab extra 1x
+        if self.dry_run:
+            return
+        try:
+            campo, linha, _cx = identificar_campo_cursor(self._pids_apac())
+            if campo_compativel(campo, CampoApac.ENDERECO, linha=linha):
+                log.info("ENDERECO: ainda no ENDERECO apos aceite — Tab extra")
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                self._enviar_tab(hwnd)
+                self._pausa("pos_tab_apos_aceitar")
+        except ConsoleScreenError as exc:
+            log.warning("ENDERECO: falha ao checar foco pos-aceite: %s", exc)
 
     def aceitar_numero_endereco_se_preenchido(self, lanc: Lancamento) -> None:
         """
-        Apos ENDERECO: Tab se preenchido; se vazio, Tab para pular.
+        Apos ENDERECO: Tab se preenchido; vazio digita BIODATA ou Tab.
         Nao usa 'confia no CPF' — isso mandava Tab cego e ia para PROCEDIMENTOS.
         """
         self._aceitar_campo_texto_se_preenchido(
@@ -1959,6 +2402,7 @@ class ApacAutomator:
             rotulo="NUMERO",
             flag_attr="_numero_end_aceito",
             max_chars=20,
+            aceitar_enter_se_origem="numero",
             vazio_aceita_tab=True,
         )
 
@@ -1996,12 +2440,13 @@ class ApacAutomator:
         log.info("COMPLEMENTO: Tab ok — proximo campo (BAIRRO).")
 
     def aceitar_bairro_se_preenchido(self, lanc: Lancamento) -> None:
-        """Apos COMPLEMENTO: Tab se preenchido; se vazio, Tab para pular."""
+        """Apos COMPLEMENTO: Tab se preenchido; vazio digita BIODATA ou Tab."""
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="BAIRRO",
             flag_attr="_bairro_aceito",
             max_chars=80,
+            aceitar_enter_se_origem="bairro",
             vazio_aceita_tab=True,
         )
 
@@ -2089,6 +2534,20 @@ class ApacAutomator:
             max_chars=80,
             vazio_digita=digita if digita else "",
         )
+        if self.dry_run:
+            return
+        try:
+            # So cx==NASCIMENTO (linha tripla tambem tem SEXO/ETNIA)
+            campo, _linha, _cx = identificar_campo_cursor(self._pids_apac())
+            if campo == CampoApac.NASCIMENTO:
+                log.info("DATA DE NASCIMENTO: ainda no campo apos aceite — Tab")
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                self._enviar_tab(hwnd)
+                self._pausa("pos_tab_apos_aceitar")
+        except ConsoleScreenError as exc:
+            log.warning(
+                "DATA DE NASCIMENTO: falha ao checar foco pos-aceite: %s", exc
+            )
 
     def aceitar_sexo_se_preenchido(self, lanc: Lancamento) -> None:
         """SEXO: Tab se preenchido; vazio digita M/F do BIODATA (avança sozinho para RACA)."""
@@ -2101,13 +2560,24 @@ class ApacAutomator:
             max_chars=80,
             vazio_digita=digita if digita else "",
         )
+        if self.dry_run:
+            return
+        try:
+            campo, _linha, _cx = identificar_campo_cursor(self._pids_apac())
+            if campo == CampoApac.SEXO:
+                log.info("SEXO: ainda no campo apos aceite — Tab")
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                self._enviar_tab(hwnd)
+                self._pausa("pos_tab_apos_aceitar")
+        except ConsoleScreenError as exc:
+            log.warning("SEXO: falha ao checar foco pos-aceite: %s", exc)
 
     def aceitar_raca_se_preenchido(self, lanc: Lancamento) -> None:
         """
-        RACA/ETNIA (ultimo passo):
+        RACA/ETNIA:
         - exige rotulo ETNIA/RACA na linha do cursor (sem Shift+Tab)
-        - se ja tem codigo 01-05: para (sem Tab)
-        - se campo vazio: digita SO 03 e encerra
+        - se ja tem codigo 01-05: ok (sem Tab)
+        - se campo vazio: digita SO 03 (sem Tab; Enter fica em avancar_para_procedimentos)
         """
         if self._raca_aceito:
             return
@@ -2146,7 +2616,7 @@ class ApacAutomator:
         )
 
         if _texto_parece_codigo_raca(texto):
-            log.info("RACA ja preenchida (%s) — fim (sem Tab).", texto)
+            log.info("RACA ja preenchida (%s) — pronto para Enter.", texto)
             self._raca_aceito = True
             return
 
@@ -2174,16 +2644,840 @@ class ApacAutomator:
         self._pausa("pos_home")
         self._digitar_texto("03", hwnd)
         self._pausa("pos_raca_digitar")
-        # Encerra imediatamente — nao envia Tab nem Shift+Tab depois do 03
         self._raca_aceito = True
+        log.info("RACA=03 digitado — proximo: Enter para PROCEDIMENTOS.")
+
+    def avancar_para_procedimentos(self) -> None:
+        """
+        Apos RACA: Enter abre PROCEDIMENTOS REALIZADOS
+        (foco automatico em Cod. Procedimento).
+
+        Dois contextos (nao misturar):
+        - APAC ja preenchido / RACA so aceita: permanece em IDENTIFICACAO → Enter.
+        - Cadastro vazio (digita RACA=03): Magnético as vezes ja abre PROCEDIMENTOS
+          → so entao pula o Enter e segue o fluxo mapeado (nao aborta).
+        """
+        if self._procedimentos_tela_ok:
+            return
+
+        if self.dry_run:
+            log.info("[dry-run] Enter apos RACA → tela PROCEDIMENTOS")
+            self._procedimentos_tela_ok = True
+            return
+
+        if not self._raca_aceito:
+            raise ApacBlockedError(
+                "avancar_para_procedimentos: RACA ainda nao foi aceita."
+            )
+
+        aguardar_enter_solto()
+        tela, _texto = self.classificar_tela_atual()
+        # So pula Enter se JA estiver em PROCEDIMENTOS (avancou sozinho).
+        # Se ainda IDENTIFICACAO (contexto APAC preenchido), Enter obrigatorio.
+        if tela == TelaApac.PROCEDIMENTOS:
+            log.info(
+                "Ja em PROCEDIMENTOS apos RACA — seguindo sem Enter "
+                "(contexto digitar RACA / Magnético avancou sozinho)."
+            )
+            self._procedimentos_tela_ok = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                "RACA ok — digite s para ENTER (ir a PROCEDIMENTOS): "
+            )
+            if not ok:
+                raise ApacBlockedError("operador recusou Enter apos RACA")
+
+        self.exigir_tela(
+            TelaApac.IDENTIFICACAO, passo="antes Enter RACA→PROCEDIMENTOS"
+        )
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("Enter apos RACA — abrindo PROCEDIMENTOS REALIZADOS")
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+        self.exigir_tela(
+            TelaApac.PROCEDIMENTOS, passo="apos Enter RACA→PROCEDIMENTOS"
+        )
+        self._procedimentos_tela_ok = True
         log.info(
-            "RACA=03 digitado — FIM da identificacao (nenhuma tecla apos o 03)."
+            "Tela PROCEDIMENTOS confirmada — foco esperado em Cod. Procedimento."
+        )
+
+    @staticmethod
+    def _codigo_procedimento_digitar(codigo: str) -> str:
+        """
+        Mascara do APAC (.. . . -) costuma aceitar so digitos.
+        Se nao houver digitos, devolve o texto limpo.
+        """
+        t = (codigo or "").strip()
+        digitos = "".join(ch for ch in t if ch.isdigit())
+        return digitos if digitos else t
+
+    def _dado_fixo(self, chave: str, default: str = "") -> str:
+        return str(self.cfg.dados_fixos.get(chave) or default).strip()
+
+    def _resolver_codigo_procedimento(self, lanc: Lancamento) -> str:
+        """dados_fixos.codigo_procedimento (UI futura) ou COD da planilha."""
+        fixo = self._dado_fixo("codigo_procedimento")
+        if fixo:
+            return fixo
+        return (lanc.codigo_apac or lanc.codigo_original or "").strip()
+
+    def _exigir_proc(self, campo: CampoApac, *, passo: str) -> str:
+        """
+        Gate de campo em PROCEDIMENTOS sem releitura full do buffer
+        (ja confirmamos a tela em entrar_procedimentos_apos_raca).
+        """
+        if not self._procedimentos_tela_ok:
+            raise ApacBlockedError(
+                f"{passo}: ainda nao esta em PROCEDIMENTOS."
+            )
+        if self.dry_run:
+            log.info("[dry-run] exigir_proc %s no passo %s", campo.value, passo)
+            return ""
+        try:
+            atual, linha, cx = identificar_campo_cursor(self._pids_apac())
+        except ConsoleScreenError as exc:
+            raise ApacBlockedError(
+                f"Passo '{passo}': falha ao ler campo no cursor: {exc}"
+            ) from exc
+        if not campo_compativel(atual, campo, linha=linha):
+            raise ApacBlockedError(
+                f"Passo '{passo}': esperava campo {campo.value}, "
+                f"encontrou {atual.value} (linha: {linha[:80]!r}). "
+                "Pare — ajuste o foco ou rode dump-apac-screen."
+            )
+        log.info(
+            "Campo OK passo=%s esperado=%s lido=%s cx=%s linha=%r",
+            passo,
+            campo.value,
+            atual.value,
+            cx,
+            linha[:60],
+        )
+        return linha
+
+    def _exigir_proc_com_tab(
+        self, campo: CampoApac, *, passo: str, max_tabs: int = 3
+    ) -> str:
+        """
+        Exige o campo na tela PROCEDIMENTOS; se o foco estiver em outro
+        (ex.: Quantidade vs CNS na mesma linha), envia Tab e tenta de novo.
+        """
+        ultimo: Optional[ApacBlockedError] = None
+        for tentativa in range(max_tabs + 1):
+            try:
+                return self._exigir_proc(campo, passo=passo)
+            except ApacBlockedError as exc:
+                ultimo = exc
+                if tentativa >= max_tabs:
+                    break
+                log.warning(
+                    "%s: campo errado (%s) — Tab %s/%s e tenta de novo.",
+                    passo,
+                    exc,
+                    tentativa + 1,
+                    max_tabs,
+                )
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                self._enviar_tab(hwnd)
+                self._pausa("pos_proc_tab")
+        assert ultimo is not None
+        raise ultimo
+
+    def preencher_cod_procedimento(self, lanc: Lancamento) -> None:
+        """
+        Digita Cod. Procedimento: dados_fixos.codigo_procedimento se setado
+        (dinamico na UI futura), senao planilha. Magnético avança sozinho ao CBO.
+        """
+        if self._cod_procedimento_preenchido:
+            return
+
+        bruto = self._resolver_codigo_procedimento(lanc)
+        digitar = self._codigo_procedimento_digitar(bruto)
+        if not digitar:
+            raise ApacBlockedError(
+                f"COD procedimento vazio (dados_fixos/planilha) "
+                f"para '{lanc.paciente_nome}'."
+            )
+
+        if self.dry_run:
+            log.info(
+                "[dry-run] COD.PROCEDIMENTO — %s → %s (origem %r)",
+                lanc.paciente_nome,
+                digitar,
+                bruto,
+            )
+            self._cod_procedimento_preenchido = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                f"COD.PROCEDIMENTO {digitar} ({bruto}) — digite s para enviar: "
+            )
+            if not ok:
+                raise ApacBlockedError("operador recusou digitar COD.PROCEDIMENTO")
+
+        aguardar_enter_solto()
+        self._exigir_proc(CampoApac.COD_PROCEDIMENTO, passo="COD.PROCEDIMENTO")
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info(
+            "Digitando COD.PROCEDIMENTO %s (origem %r) — sem Tab",
+            digitar,
+            bruto,
+        )
+        self._digitar_texto(digitar, hwnd)
+        self._pausa("pos_proc_digitar")
+        self._cod_procedimento_preenchido = True
+        log.info("COD.PROCEDIMENTO ok — proximo: C.B.O.")
+
+    def preencher_cbo(self) -> None:
+        """C.B.O. fixo (dados_fixos.cbo)."""
+        if self._cbo_preenchido:
+            return
+
+        cbo = self._dado_fixo("cbo", "225265")
+        digitar = "".join(ch for ch in cbo if ch.isdigit()) or cbo
+        if not digitar:
+            raise ApacBlockedError("dados_fixos.cbo vazio.")
+
+        if self.dry_run:
+            log.info("[dry-run] C.B.O. — %s", digitar)
+            self._cbo_preenchido = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(f"C.B.O. {digitar} — digite s para enviar: ")
+            if not ok:
+                raise ApacBlockedError("operador recusou digitar C.B.O.")
+
+        aguardar_enter_solto()
+        self._exigir_proc_com_tab(CampoApac.CBO, passo="C.B.O.")
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("Digitando C.B.O. %s (sem Tab)", digitar)
+        self._digitar_texto(digitar, hwnd)
+        self._pausa("pos_proc_digitar")
+        self._cbo_preenchido = True
+        log.info("C.B.O. ok — proximo: Quantidade.")
+
+    def preencher_quantidade_procedimento(self) -> None:
+        """Quantidade sempre 1 (dados_fixos.quantidade_procedimento)."""
+        if self._qtd_procedimento_preenchida:
+            return
+
+        qtd = self._dado_fixo("quantidade_procedimento", "1") or "1"
+        digitar = "".join(ch for ch in qtd if ch.isdigit()) or "1"
+
+        if self.dry_run:
+            log.info("[dry-run] Quantidade — %s", digitar)
+            self._qtd_procedimento_preenchida = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(f"Quantidade {digitar} — digite s para enviar: ")
+            if not ok:
+                raise ApacBlockedError("operador recusou digitar Quantidade")
+
+        aguardar_enter_solto()
+        self._exigir_proc_com_tab(CampoApac.QUANTIDADE, passo="QUANTIDADE")
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("Digitando Quantidade %s (sem Tab)", digitar)
+        self._digitar_texto(digitar, hwnd)
+        self._pausa("pos_proc_digitar")
+        # Garante avanço para CNS (mesma linha — nao digitar CNS em Quantidade)
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        self._enviar_tab(hwnd)
+        self._pausa("pos_proc_tab")
+        self._qtd_procedimento_preenchida = True
+        log.info("Quantidade ok — Tab para CNS Executante.")
+
+    def preencher_cns_executante(self) -> None:
+        """CNS Executante dinamico (dados_fixos.cns_executante; UI futura)."""
+        if self._cns_executante_preenchido:
+            return
+
+        cns = self._dado_fixo("cns_executante")
+        digitar = "".join(ch for ch in cns if ch.isdigit()) or cns
+        if not digitar:
+            raise ApacBlockedError("dados_fixos.cns_executante vazio.")
+
+        if self.dry_run:
+            log.info("[dry-run] CNS Executante — %s", digitar)
+            self._cns_executante_preenchido = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                f"CNS Executante {digitar} — digite s para enviar: "
+            )
+            if not ok:
+                raise ApacBlockedError("operador recusou digitar CNS Executante")
+
+        aguardar_enter_solto()
+        # Tab se ainda estiver em Quantidade (linha compartilhada)
+        self._exigir_proc_com_tab(CampoApac.CNS_EXECUTANTE, passo="CNS EXECUTANTE")
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("Digitando CNS Executante %s (sem Tab)", digitar)
+        self._digitar_texto(digitar, hwnd)
+        self._pausa("pos_proc_digitar")
+        # Sem Tab cego — Magnético pode pular Equipe vazia; pular_equipe decide
+        self._cns_executante_preenchido = True
+        log.info("CNS Executante ok — proximo: Equipe / Servico.")
+
+    def _campo_proc_atual(self) -> tuple[CampoApac, str]:
+        """Campo + linha do cursor (sem full buffer / exigir_tela)."""
+        try:
+            campo, linha, _cx = identificar_campo_cursor(self._pids_apac())
+        except ConsoleScreenError as exc:
+            raise ApacBlockedError(
+                f"Falha ao ler campo em PROCEDIMENTOS: {exc}"
+            ) from exc
+        return campo, linha
+
+    def _tab_proc(self, *, passo: str) -> None:
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("%s: Tab", passo)
+        self._enviar_tab(hwnd)
+        self._pausa("pos_proc_tab")
+
+    def _enter_proc(self, *, passo: str) -> None:
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("%s: Enter", passo)
+        self._enviar_enter(hwnd)
+        self._pausa("pos_proc_tab")
+
+    def pular_equipe(self) -> None:
+        """
+        Equipe vazia: 1 Tab se o foco estiver nela.
+        Se o Magnético ja pulou (foco em Servico/Classif), so marca ok.
+        """
+        if self._equipe_pulada:
+            return
+
+        if self.dry_run:
+            log.info("[dry-run] Equipe — Tab (vazio) ou ja pulada")
+            self._equipe_pulada = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn("Equipe vazia — digite s para conferir/Tab: ")
+            if not ok:
+                raise ApacBlockedError("operador recusou passo Equipe")
+
+        aguardar_enter_solto()
+        acao = None
+        for _ in range(3):
+            campo, linha = self._campo_proc_atual()
+            acao = decidir_acao_equipe(campo)
+            log.info(
+                "Equipe: foco=%s acao=%s linha=%r",
+                campo.value,
+                acao,
+                linha[:60],
+            )
+            if acao == "ja_pulada":
+                self._equipe_pulada = True
+                log.info("Equipe ja pulada pelo Magnético — seguindo.")
+                return
+            if acao == "tab":
+                self._tab_proc(passo="EQUIPE (vazio)")
+                self._equipe_pulada = True
+                log.info("Equipe ok — proximo: Servico (Tab aceitar).")
+                return
+            # ainda no CNS (ou anterior): Tab uma vez e rele
+            self._tab_proc(passo="EQUIPE (sair do CNS)")
+        raise ApacBlockedError(
+            f"Equipe: nao foi possivel posicionar (ultima acao={acao})."
+        )
+
+    def aceitar_servico_se_preenchido(self) -> None:
+        """Servico ja vem preenchido — Tab sem sobrescrever."""
+        if self._servico_aceito:
+            return
+
+        if self.dry_run:
+            log.info("[dry-run] Servico — Tab (aceitar sem redigitar)")
+            self._servico_aceito = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn("Servico — digite s para Tab (aceitar): ")
+            if not ok:
+                raise ApacBlockedError("operador recusou Tab em Servico")
+
+        aguardar_enter_solto()
+        for _ in range(3):
+            campo, linha = self._campo_proc_atual()
+            acao = decidir_acao_servico(campo)
+            log.info(
+                "Servico: foco=%s acao=%s linha=%r",
+                campo.value,
+                acao,
+                linha[:60],
+            )
+            if acao == "ja_ok":
+                self._servico_aceito = True
+                log.info("Servico ja ultrapassado — seguindo para Classif.")
+                return
+            if acao == "tab":
+                self._tab_proc(passo="SERVICO (aceitar)")
+                self._servico_aceito = True
+                log.info("Servico ok — proximo: Classificacao (Tab aceitar).")
+                return
+            self._tab_proc(passo="SERVICO (avancar)")
+        raise ApacBlockedError("Servico: nao foi possivel posicionar.")
+
+    def aceitar_classificacao_se_preenchido(self) -> None:
+        """Classificacao ja vem preenchida — Enter sem sobrescrever (proximo = CID)."""
+        if self._classificacao_aceita:
+            return
+
+        if self.dry_run:
+            log.info("[dry-run] Classificacao — Enter (aceitar sem redigitar)")
+            self._classificacao_aceita = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                "Classificacao — digite s para Enter (aceitar): "
+            )
+            if not ok:
+                raise ApacBlockedError("operador recusou Enter em Classificacao")
+
+        aguardar_enter_solto()
+        for _ in range(3):
+            campo, linha = self._campo_proc_atual()
+            acao = decidir_acao_classificacao(campo)
+            log.info(
+                "Classificacao: foco=%s acao=%s linha=%r",
+                campo.value,
+                acao,
+                linha[:60],
+            )
+            if acao == "tab":
+                # Magnético: Enter aceita Classif. e vai ao proximo (CID)
+                self._enter_proc(passo="CLASSIFICACAO (aceitar)")
+                self._classificacao_aceita = True
+                log.info(
+                    "Classificacao ok — Enter para proximo campo (CID)."
+                )
+                return
+            self._tab_proc(passo="CLASSIFICACAO (avancar)")
+        raise ApacBlockedError("Classificacao: nao foi possivel posicionar.")
+
+    def preencher_motivo_saida(self) -> None:
+        """
+        Na lista PROCEDIMENTOS REALIZADOS: Tab ate MOTIVO SAIDA
+        (Enter na grade edita o registro), digita 12 e Enter.
+        Nao preenche DATA ALTA.
+        """
+        if self._motivo_saida_preenchido:
+            return
+
+        digitar = self._dado_fixo("motivo_saida", "12") or "12"
+        digitar = "".join(ch for ch in digitar if ch.isdigit()) or "12"
+
+        if self.dry_run:
+            log.info("[dry-run] MOTIVO SAIDA — Tab, %s + Enter", digitar)
+            self._motivo_saida_preenchido = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                f"MOTIVO SAIDA {digitar} — digite s para enviar: "
+            )
+            if not ok:
+                raise ApacBlockedError("operador recusou digitar MOTIVO SAIDA")
+
+        aguardar_enter_solto()
+        if not self._procedimentos_tela_ok:
+            raise ApacBlockedError(
+                "MOTIVO SAIDA: ainda nao esta em PROCEDIMENTOS."
+            )
+
+        for tentativa in range(3):
+            campo, linha = self._campo_proc_atual()
+            log.info(
+                "MOTIVO SAIDA: foco=%s tentativa=%s linha=%r",
+                campo.value,
+                tentativa + 1,
+                linha[:60],
+            )
+            if campo == CampoApac.MOTIVO_SAIDA or campo_compativel(
+                campo, CampoApac.MOTIVO_SAIDA, linha=linha
+            ):
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                log.info("Digitando MOTIVO SAIDA %s", digitar)
+                self._digitar_texto(digitar, hwnd)
+                self._pausa("pos_proc_digitar")
+                self._enter_proc(passo="MOTIVO SAIDA (aceitar)")
+                self._motivo_saida_preenchido = True
+                log.info(
+                    "MOTIVO SAIDA ok (%s) — pare antes de DATA ALTA / salvar.",
+                    digitar,
+                )
+                return
+            if campo in (
+                CampoApac.COD_PROCEDIMENTO,
+                CampoApac.CBO,
+                CampoApac.QUANTIDADE,
+                CampoApac.CLASSIFICACAO,
+            ):
+                log.warning(
+                    "MOTIVO SAIDA: foco em %s (edicao?) — Tab, nao Enter.",
+                    campo.value,
+                )
+            # Grade / outro campo: Tab (Enter na lista = Alteracao)
+            self._tab_proc(passo="MOTIVO SAIDA (focar)")
+        raise ApacBlockedError(
+            "MOTIVO SAIDA: nao foi possivel posicionar o cursor."
+        )
+
+    def preencher_data_alta_mes_anterior(self) -> None:
+        """
+        DATA ALTA/OBITO/TRANSF./MUDANCA PROCED.: ultimo dia do mes anterior
+        (DDMMAAAA). Sem Enter (mascara).
+        """
+        if self._data_alta_preenchida:
+            return
+
+        _, fim = datas_validade_mes_anterior()
+        fim_legivel = f"{fim[:2]}/{fim[2:4]}/{fim[4:]}"
+
+        if self.dry_run:
+            log.info("[dry-run] DATA ALTA — %s", fim_legivel)
+            self._data_alta_preenchida = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                f"DATA ALTA {fim_legivel} — digite s (sem Enter): "
+            )
+            if not ok:
+                raise ApacBlockedError("operador recusou digitar DATA ALTA")
+
+        aguardar_enter_solto()
+        if not self._procedimentos_tela_ok:
+            raise ApacBlockedError(
+                "DATA ALTA: ainda nao esta em PROCEDIMENTOS."
+            )
+
+        for tentativa in range(3):
+            campo, linha = self._campo_proc_atual()
+            log.info(
+                "DATA ALTA: foco=%s tentativa=%s linha=%r",
+                campo.value,
+                tentativa + 1,
+                linha[:60],
+            )
+            if campo == CampoApac.DATA_ALTA or campo_compativel(
+                campo, CampoApac.DATA_ALTA, linha=linha
+            ):
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                log.info("Digitando DATA ALTA %s (sem Enter)", fim)
+                self._digitar_texto(fim, hwnd)
+                self._pausa("pos_proc_digitar")
+                self._data_alta_preenchida = True
+                log.info(
+                    "DATA ALTA ok (%s) — seguindo para DADOS COMPLEMENTARES.",
+                    fim_legivel,
+                )
+                return
+            self._tab_proc(passo="DATA ALTA (focar)")
+        raise ApacBlockedError(
+            "DATA ALTA: nao foi possivel posicionar o cursor."
+        )
+
+    def preencher_cid_dados_complementares(self) -> None:
+        """
+        Tela DADOS COMPLEMENTARES (foco C.I.D. PRINCIPAL):
+          F1 -> Enter (1a opcao) -> Enter (SECUNDARIO vazio) -> Enter (CAUSAS)
+        Para em SOLICITACAO/AUTORIZACAO (CARATER ATEND.) sem preencher.
+        """
+        if self._cid_complementares_ok:
+            return
+
+        if self.dry_run:
+            log.info(
+                "[dry-run] CID DADOS COMPLEMENTARES — F1 + 3 Enter "
+                "(para em SOLICITACAO/CARATER)"
+            )
+            self._cid_complementares_ok = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                "CID PRINCIPAL (F1 + 3 Enter) — digite s para enviar: "
+            )
+            if not ok:
+                raise ApacBlockedError(
+                    "operador recusou preencher CID DADOS COMPLEMENTARES"
+                )
+
+        if not self._data_alta_preenchida:
+            raise ApacBlockedError(
+                "CID complementares: DATA ALTA ainda nao preenchida."
+            )
+
+        aguardar_enter_solto()
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+
+        # Apos DATA ALTA (sem Enter): pode ainda estar em PROCEDIMENTOS
+        tela, texto = self.classificar_tela_atual()
+        if tela == TelaApac.PROCEDIMENTOS or (
+            "DADOS COMPLEMENTARES" not in (texto or "").upper()
+            and tela != TelaApac.DADOS_COMPLEMENTARES
+        ):
+            log.info(
+                "CID: ainda nao em DADOS COMPLEMENTARES (tela=%s) — Enter 1x",
+                tela.value,
+            )
+            self._enviar_enter(hwnd)
+            self._pausa("pos_enter_form")
+            tela, texto = self.classificar_tela_atual()
+
+        if tela != TelaApac.DADOS_COMPLEMENTARES and (
+            "DADOS COMPLEMENTARES" not in (texto or "").upper()
+        ):
+            raise ApacBlockedError(
+                "CID complementares: esperava DADOS COMPLEMENTARES, "
+                f"encontrou {tela.value} (preview: {preview_tela(texto)!r})."
+            )
+
+        # Gate leve: foco em CID PRINCIPAL (ou linha compativel)
+        try:
+            campo, linha, _cx = identificar_campo_cursor(self._pids_apac())
+        except ConsoleScreenError as exc:
+            raise ApacBlockedError(
+                f"CID complementares: falha ao ler campo no cursor: {exc}"
+            ) from exc
+        if not campo_compativel(
+            campo, CampoApac.CID_PRINCIPAL, linha=linha
+        ):
+            log.warning(
+                "CID: foco=%s linha=%r — seguindo mesmo assim (F1 no campo atual)",
+                campo.value,
+                linha[:60],
+            )
+        else:
+            log.info("CID PRINCIPAL: foco ok linha=%r", linha[:60])
+
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("CID PRINCIPAL: F1 (ajuda / 1a opcao)")
+        self._enviar_f1(hwnd)
+        self._pausa("pos_f1")
+
+        log.info("CID PRINCIPAL: Enter (aceitar 1a opcao)")
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        log.info("CID SECUNDARIO: Enter (vazio)")
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        def _eh_solicitacao(tela: TelaApac, texto: str) -> bool:
+            upper = (texto or "").upper()
+            return (
+                tela == TelaApac.SOLICITACAO
+                or "SOLICITACAO" in upper
+                or "AUTORIZACAO" in upper
+                or "AUTORIZAÇÃO" in upper
+                or "CARATER ATEND" in upper
+            )
+
+        # CAUSAS ASSOCIADAS: Enter + ate 2 retries se ainda em DADOS COMPLEMENTARES
+        max_causas_enter = 3
+        tela = TelaApac.DESCONHECIDA
+        texto = ""
+        for i in range(1, max_causas_enter + 1):
+            hwnd = self._ativar_janela_apac(clicar_centro=False)
+            log.info(
+                "CAUSAS ASSOCIADAS: Enter %s/%s (vazio) → SOLICITACAO",
+                i,
+                max_causas_enter,
+            )
+            self._enviar_enter(hwnd)
+            self._pausa("pos_enter_form")
+            tela, texto = self.classificar_tela_atual()
+            if _eh_solicitacao(tela, texto):
+                break
+            if i < max_causas_enter:
+                log.warning(
+                    "CAUSAS: ainda tela=%s apos Enter %s — retry Enter",
+                    tela.value,
+                    i,
+                )
+        else:
+            raise ApacBlockedError(
+                "CID complementares: apos Enter em CAUSAS esperava "
+                f"SOLICITACAO/AUTORIZACAO, encontrou {tela.value} "
+                f"(preview: {preview_tela(texto)!r})."
+            )
+
+        self._cid_complementares_ok = True
+        log.info(
+            "CID DADOS COMPLEMENTARES ok — tela SOLICITACAO/AUTORIZACAO "
+            "(foco CARATER ATEND.)."
+        )
+
+    def _selecionar_profissional_f1(self, nome: str, *, passo: str) -> None:
+        """
+        No campo CNS: F1 abre CONSULTA DE PROFISSIONAL; digita descricao (A-Z);
+        Enter seleciona e fecha o menu.
+        """
+        digitar = _nome_profissional_f1(nome)
+        if not digitar:
+            raise ApacBlockedError(f"{passo}: nome do profissional vazio.")
+
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("%s: F1 (consulta profissional) → %r", passo, digitar)
+        self._enviar_f1(hwnd)
+        self._pausa("pos_f1")
+
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        self._digitar_texto(digitar, hwnd)
+        self._pausa("pos_digitar_curto")
+
+        log.info("%s: Enter (selecionar profissional)", passo)
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        texto = self.ler_tela_console()
+        if "CONSULTA DE PROFISSIONAL" in (texto or "").upper():
+            log.warning(
+                "%s: menu ainda aberto apos Enter — novo Enter",
+                passo,
+            )
+            self._enviar_enter(hwnd)
+            self._pausa("pos_enter_form")
+
+    def preencher_solicitacao_autorizacao(self) -> None:
+        """
+        Tela SOLICITACAO/AUTORIZACAO:
+          CARATER 01 → CNS medico (F1) → NOME Enter → DT.SOLICITACAO
+          → CNS autorizador (F1) → NOME Enter → DT.AUTORIZACAO
+          → COD.ORGAO + Enter → LISTA.
+        """
+        if self._solicitacao_ok:
+            return
+
+        carater = self._dado_fixo("carater_atend", "01") or "01"
+        medico = self._dado_fixo(
+            "medico_solicitante_nome", "ORCELIO REZENDE"
+        ) or "ORCELIO REZENDE"
+        autorizador = self._dado_fixo(
+            "autorizador_nome", "MARQUES HENRIQUE MARTINS FEITO"
+        ) or "MARQUES HENRIQUE MARTINS FEITO"
+        orgao = self._dado_fixo("cod_orgao_emiss", "M211130001")
+        inicio, _fim = datas_validade_mes_anterior()
+        inicio_legivel = f"{inicio[:2]}/{inicio[2:4]}/{inicio[4:]}"
+
+        if self.dry_run:
+            log.info(
+                "[dry-run] SOLICITACAO — carater=%s medico=%r autorizador=%r "
+                "dt=%s orgao=%s → LISTA",
+                carater,
+                medico,
+                autorizador,
+                inicio_legivel,
+                orgao,
+            )
+            self._solicitacao_ok = True
+            return
+
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                "SOLICITACAO/AUTORIZACAO (CARATER→LISTA) — digite s: "
+            )
+            if not ok:
+                raise ApacBlockedError(
+                    "operador recusou preencher SOLICITACAO/AUTORIZACAO"
+                )
+
+        if not orgao:
+            raise ApacBlockedError(
+                "dados_fixos.cod_orgao_emiss e obrigatorio "
+                "(dinamico por clinica; UI futura)."
+            )
+
+        aguardar_enter_solto()
+        self.exigir_tela(TelaApac.SOLICITACAO, passo="SOLICITACAO/AUTORIZACAO")
+
+        # 1) CARATER ATEND.
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        try:
+            campo, linha, _cx = identificar_campo_cursor(self._pids_apac())
+        except ConsoleScreenError as exc:
+            raise ApacBlockedError(
+                f"CARATER: falha ao ler campo: {exc}"
+            ) from exc
+        if not campo_compativel(campo, CampoApac.CARATER_ATEND, linha=linha):
+            log.warning(
+                "CARATER: foco=%s linha=%r — digitando mesmo assim",
+                campo.value,
+                linha[:60],
+            )
+        log.info("CARATER ATEND. %s + Enter", carater)
+        self._digitar_texto(carater, hwnd)
+        self._pausa("pos_digitar_curto")
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        # 2) CNS medico responsavel
+        self._selecionar_profissional_f1(medico, passo="CNS medico")
+        log.info("CNS medico: Enter (pula CPF → NOME)")
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        log.info("NOME medico: Enter (aceitar preenchido)")
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        # 3) DT.SOLICITACAO = 1o dia mes anterior
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("DT.SOLICITACAO %s (sem Enter extra)", inicio_legivel)
+        self._digitar_texto(inicio, hwnd)
+        self._pausa("pos_digitar_curto")
+
+        # 4) CNS autorizador
+        self._selecionar_profissional_f1(autorizador, passo="CNS autorizador")
+        log.info("CNS autorizador: Enter (pula CPF → NOME)")
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        log.info("NOME autorizador: Enter (aceitar preenchido)")
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        # 5) DT.AUTORIZACAO
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("DT.AUTORIZACAO %s (sem Enter extra)", inicio_legivel)
+        self._digitar_texto(inicio, hwnd)
+        self._pausa("pos_digitar_curto")
+
+        # 6) COD.ORGAO EMISS + Enter → LISTA
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
+        log.info("COD.ORGAO EMISS %s + Enter → LISTA", orgao)
+        self._digitar_texto(orgao, hwnd)
+        self._pausa("pos_digitar_curto")
+        self._enviar_enter(hwnd)
+        self._pausa("pos_enter_form")
+
+        self.exigir_tela(TelaApac.LISTA, passo="apos SOLICITACAO (volta LISTA)")
+        self._solicitacao_ok = True
+        log.info(
+            "SOLICITACAO/AUTORIZACAO ok — voltou a LISTA "
+            "(pronto para Insert do proximo paciente)."
         )
 
     def iniciar_inclusao_insert(self) -> None:
         """
         Na lista ATUALIZACAO DE APAC: Insert inicia inclusao de novo cadastro.
-        Sem clique no centro (pode interferir na lista). Uma vez por sessao open-apac.
+        Sem clique no centro (pode interferir na lista).
+        Uma vez por paciente (flag zerada via _reiniciar_flags_paciente).
         """
         if self._insert_inclusao_feito:
             return
@@ -2503,30 +3797,25 @@ class ApacAutomator:
         raise ApacBlockedError(f"campo de texto não resolvido: {campo}")
 
 
-def open_apac_session(cfg: AppConfig) -> None:
-    """
-    Abre o APAC ate RACA: CPF (BIODATA), identificacao ate email,
-    nascimento, sexo e raca (03 se vazio). Sessao BIODATA aberta ate o fim.
-    Gates de tela via buffer do console (conhost).
-    """
-    automator = ApacAutomator(cfg, dry_run=False)
-    if not cfg.apac.get("titulo_janela"):
-        raise ApacBlockedError("apac.titulo_janela não configurado.")
-    try:
-        lanc = resolver_lancamento_inicio(cfg)
-    except SheetError as exc:
-        raise ApacBlockedError(str(exc)) from exc
+def _processar_paciente_open_apac(
+    automator: ApacAutomator,
+    connector,
+    lanc: Lancamento,
+    *,
+    indice: int,
+    total: int,
+) -> None:
+    """Fluxo completo de um paciente: Insert → identificacao → procedimentos → LISTA."""
     log.info(
-        "Paciente inicio: %s | NUMERO APAC: %s (planilha linha %s)",
+        "Lote %s/%s: %s | NUMERO APAC: %s (planilha linha %s)",
+        indice,
+        total,
         lanc.paciente_nome,
         lanc.numeracao_apac,
         lanc.linha_planilha,
     )
-    automator.garantir_sessao_inicial_limpa()
-    automator.ensure_running()
-    automator._pausa("pos_apos_ensure")
-    automator.exigir_tela(TelaApac.MENU, passo="inicio open-apac")
-    automator.navegar_ate_cadastro()
+    automator.exigir_tela(TelaApac.LISTA, passo=f"antes Insert ({lanc.paciente_nome})")
+    automator._reiniciar_flags_paciente()
     automator.iniciar_inclusao_insert()
 
     # Bloco 1 — cabecalho
@@ -2538,54 +3827,217 @@ def open_apac_session(cfg: AppConfig) -> None:
     automator.preencher_tipo_e_nacionalidade()
     automator.preencher_prontuario_e_sem_cpf()
 
+    log.info(
+        "Consultando BIODATA para %s (sessao compartilhada do lote)...",
+        lanc.paciente_nome,
+    )
+    cpf = buscar_paciente_biodata(connector, lanc)
+
+    # Bloco 2 — CPF / nomes
+    automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco cpf/nomes")
+    automator.preencher_cpf_apac(lanc, cpf)
+    automator.preencher_situacao_rua()
+    automator.aceitar_nome_se_preenchido(lanc)
+    automator.aceitar_nome_mae_se_preenchido(lanc)
+    automator.aceitar_nome_responsavel_se_preenchido(lanc)
+
+    # Bloco 3 — endereco
+    automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco endereco")
+    automator.aceitar_cep_se_preenchido(lanc)
+    automator.aceitar_logradouro_se_preenchido(lanc)
+    automator.aceitar_endereco_se_preenchido(lanc)
+    automator.aceitar_numero_endereco_se_preenchido(lanc)
+    automator.aceitar_complemento_se_preenchido(lanc)
+    automator.aceitar_bairro_se_preenchido(lanc)
+
+    # Bloco 4 — contato / nascimento / sexo / raca
+    automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco contato/raca")
+    automator.aceitar_telefone_se_preenchido(lanc)
+    automator.aceitar_email_se_preenchido(lanc)
+    automator.aceitar_nascimento_se_preenchido(lanc)
+    automator.aceitar_sexo_se_preenchido(lanc)
+    automator.aceitar_raca_se_preenchido(lanc)
+    log.info(
+        "APAC: identificacao ate RACA de %s ok — avancando a PROCEDIMENTOS.",
+        lanc.paciente_nome,
+    )
+    automator.avancar_para_procedimentos()
+    automator.preencher_cod_procedimento(lanc)
+    automator.preencher_cbo()
+    automator.preencher_quantidade_procedimento()
+    automator.preencher_cns_executante()
+    automator.pular_equipe()
+    automator.aceitar_servico_se_preenchido()
+    automator.aceitar_classificacao_se_preenchido()
+    automator.preencher_motivo_saida()
+    automator.preencher_data_alta_mes_anterior()
+    automator.preencher_cid_dados_complementares()
+    automator.preencher_solicitacao_autorizacao()
+    log.info(
+        "APAC: paciente %s concluido ate LISTA "
+        "(cod=%s carater=%s medico=%r autorizador=%r orgao=%s).",
+        lanc.paciente_nome,
+        automator._resolver_codigo_procedimento(lanc),
+        automator._dado_fixo("carater_atend", "01") or "01",
+        automator._dado_fixo(
+            "medico_solicitante_nome", "ORCELIO REZENDE"
+        ),
+        automator._dado_fixo(
+            "autorizador_nome", "MARQUES HENRIQUE MARTINS FEITO"
+        ),
+        automator._dado_fixo("cod_orgao_emiss", "M211130001"),
+    )
+
+
+def _progress_store(cfg: AppConfig) -> ProgressStore:
+    return ProgressStore(resolve_path(config_dir(cfg), cfg.progresso_db))
+
+
+def open_apac_session(cfg: AppConfig) -> None:
+    """
+    Processa em lote todos os pacientes ativos a partir de paciente_inicio.
+    Grava progresso (CONCLUIDO ao voltar a LISTA) para retomar sem reprocessar.
+    Sessao APAC + BIODATA abertas uma vez; BIODATA so fecha apos o ultimo
+    (ou no finally apos erro bloqueante).
+    """
+    automator = ApacAutomator(cfg, dry_run=False)
+    if not cfg.apac.get("titulo_janela"):
+        raise ApacBlockedError("apac.titulo_janela não configurado.")
+    try:
+        fila_completa = listar_lancamentos_a_partir(cfg)
+    except SheetError as exc:
+        raise ApacBlockedError(str(exc)) from exc
+
+    store = _progress_store(cfg)
+    fila, pulados, alterados = filtrar_pendentes_lote(fila_completa, store)
+    for lanc_p, motivo_p in pulados:
+        log.info(
+            "Pulando %s (%s)",
+            lanc_p.paciente_nome,
+            motivo_p,
+        )
+    for lanc_alt in alterados:
+        log.warning(
+            "Entrada alterada — reprocessando %s",
+            lanc_alt.paciente_nome,
+        )
+
+    if not fila:
+        log.info(
+            "Lote open-apac: nada a processar "
+            "(%s na planilha a partir do inicio; %s ja pulado(s)).",
+            len(fila_completa),
+            len(pulados),
+        )
+        return
+
+    total = len(fila)
+    primeiro = fila[0]
+    log.info(
+        "Lote open-apac: %s pendente(s) de %s a partir de %s (linha %s)",
+        total,
+        len(fila_completa),
+        primeiro.paciente_nome,
+        primeiro.linha_planilha,
+    )
+
+    automator.garantir_sessao_inicial_limpa()
+    automator.ensure_running()
+    automator._pausa("pos_apos_ensure")
+    automator.exigir_tela(TelaApac.MENU, passo="inicio open-apac")
+    automator.navegar_ate_cadastro()
+
     if automator._confirmar_nav():
         ok = automator.confirm_fn(
-            f"Buscar CPF no BIODATA para {lanc.paciente_nome}? digite s: "
+            f"Buscar CPF no BIODATA para {total} paciente(s) "
+            f"a partir de {primeiro.paciente_nome}? digite s: "
         )
         if not ok:
             raise ApacBlockedError("operador recusou busca de CPF no BIODATA")
 
     connector = None
+    concluidos = 0
     try:
-        log.info(
-            "Consultando BIODATA para %s (somente este paciente)...",
-            lanc.paciente_nome,
-        )
         try:
             connector = build_connector(cfg.sistema_origem, cfg)
         except (BiodataMappingError, ValueError) as exc:
             raise ApacBlockedError(str(exc)) from exc
         automator._biodata_connector = connector
-        cpf = buscar_paciente_biodata(connector, lanc)
 
-        # Bloco 2 — CPF / nomes
-        automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco cpf/nomes")
-        automator.preencher_cpf_apac(lanc, cpf)
-        automator.preencher_situacao_rua()
-        automator.aceitar_nome_se_preenchido(lanc)
-        automator.aceitar_nome_mae_se_preenchido(lanc)
-        automator.aceitar_nome_responsavel_se_preenchido(lanc)
+        for i, lanc in enumerate(fila, start=1):
+            store.upsert(lanc, EstadoLancamento.EM_PROCESSAMENTO)
+            try:
+                _processar_paciente_open_apac(
+                    automator,
+                    connector,
+                    lanc,
+                    indice=i,
+                    total=total,
+                )
+                store.upsert(
+                    lanc,
+                    EstadoLancamento.CONCLUIDO,
+                    motivo="open-apac: voltou a LISTA",
+                )
+                concluidos += 1
+            except ApacInterruptedError as exc:
+                store.upsert(
+                    lanc,
+                    EstadoLancamento.SALVAMENTO_INCERTO
+                    if exc.durante_salvamento
+                    else EstadoLancamento.ERRO,
+                    motivo=str(exc),
+                    precisa_reconciliar=exc.durante_salvamento,
+                )
+                log.error(
+                    "Lote interrompido no paciente %s/%s: %s",
+                    i,
+                    total,
+                    lanc.paciente_nome,
+                )
+                raise
+            except ApacBlockedError as exc:
+                store.upsert(lanc, EstadoLancamento.ERRO, motivo=str(exc))
+                log.error(
+                    "Lote interrompido no paciente %s/%s: %s",
+                    i,
+                    total,
+                    lanc.paciente_nome,
+                )
+                raise
+            except KeyboardInterrupt:
+                store.upsert(
+                    lanc,
+                    EstadoLancamento.ERRO,
+                    motivo="interrompido pelo usuario (Ctrl+C)",
+                )
+                log.error(
+                    "Lote interrompido (Ctrl+C) no paciente %s/%s: %s",
+                    i,
+                    total,
+                    lanc.paciente_nome,
+                )
+                raise
+            except Exception as exc:
+                store.upsert(
+                    lanc,
+                    EstadoLancamento.ERRO,
+                    motivo=type(exc).__name__,
+                )
+                log.error(
+                    "Lote interrompido no paciente %s/%s: %s (%s)",
+                    i,
+                    total,
+                    lanc.paciente_nome,
+                    type(exc).__name__,
+                )
+                raise
 
-        # Bloco 3 — endereco
-        automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco endereco")
-        automator.aceitar_cep_se_preenchido(lanc)
-        automator.aceitar_logradouro_se_preenchido(lanc)
-        automator.aceitar_endereco_se_preenchido(lanc)
-        automator.aceitar_numero_endereco_se_preenchido(lanc)
-        automator.aceitar_complemento_se_preenchido(lanc)
-        automator.aceitar_bairro_se_preenchido(lanc)
-
-        # Bloco 4 — contato / nascimento / sexo / raca
-        automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco contato/raca")
-        automator.aceitar_telefone_se_preenchido(lanc)
-        automator.aceitar_email_se_preenchido(lanc)
-        automator.aceitar_nascimento_se_preenchido(lanc)
-        automator.aceitar_sexo_se_preenchido(lanc)
-        automator.aceitar_raca_se_preenchido(lanc)
         log.info(
-            "APAC: identificacao ate RACA de %s ok (foco permanece no campo). "
-            "Pare para conferencia.",
-            lanc.paciente_nome,
+            "Lote open-apac concluido: %s paciente(s) neste run "
+            "(%s pulado(s) na retomada).",
+            concluidos,
+            len(pulados),
         )
     finally:
         automator._biodata_connector = None

@@ -8,6 +8,11 @@ from apac_bot.logging_safe import setup_logging
 from apac_bot.models import PacienteDados
 from apac_bot.normalize import sexo_para_apac, tem_cpf_valido
 from apac_bot.secrets import SecretsError, load_biodata_credentials
+from apac_bot.sheet import (
+    opcao_contem_prontuario,
+    prontuario_so_digitos,
+    sanitizar_nome_opcao,
+)
 
 log = setup_logging()
 
@@ -26,9 +31,14 @@ DEFAULT_LOGIN_LOCATORS = {
 }
 
 DEFAULT_REAUTH_LOCATORS = {
-    "titulo": "text=Autenticação",
-    "campo_senha": "role=textbox[name='Senha']",
-    "botao_login": "role=button[name='Login']",
+    "titulo": "Autenticação",
+    "campo_senha": "input[type='password'], input[name='password']",
+    "botao_login": "button:has-text('Login')",
+}
+
+DEFAULT_LOGOUT_LOCATORS = {
+    "menu_usuario": "text=Usuário:",
+    "botao_sair": "button:has-text('Sair')",
 }
 
 
@@ -166,62 +176,85 @@ class BiodataConnector:
 
     def _tratar_reauth_se_necessario(self) -> None:
         assert self._page is not None
-        page = self._page
-        reauth = (self.cfg.biodata.get("reauth") or {})
-        titulo = reauth.get("titulo") or "Autenticação"
-        if page.get_by_role("heading", name=titulo).count() == 0 and page.get_by_text(
-            titulo, exact=False
-        ).count() == 0:
-            return
-        log.info("Modal de reautenticação detectado; preenchendo senha.")
-        creds = load_biodata_credentials(self.cfg)
-        if creds is None:
-            input("Faça a autenticação no navegador e pressione Enter...")
-            return
-        senha_sel = reauth.get("campo_senha") or "input[type='password'], input[name='password']"
-        # No modal o campo Senha pode ser type=text
-        campo = page.get_by_role("textbox", name="Senha")
-        if campo.count():
-            campo.first.fill(creds.senha)
-        else:
-            page.locator(senha_sel).last.fill(creds.senha)
-        botao = page.get_by_role("button", name="Login")
-        if botao.count():
-            botao.first.click()
-        else:
-            page.locator(reauth.get("botao_login") or "button:has-text('Login')").last.click()
-        page.wait_for_timeout(1500)
-        # Aguarda sumir o título do modal
-        try:
-            page.get_by_role("heading", name=titulo).first.wait_for(state="hidden", timeout=10000)
-        except Exception:
-            pass
+        tratar_reauth_se_necessario(self._page, self.cfg)
+
+    def _recuperar_sessao_e_cadastro(self) -> None:
+        """
+        Sessao provavelmente expirada (busca vazia): login completo em biodata.url
+        e reabre Cadastro de Pacientes para nova tentativa de busca.
+        """
+        assert self._page is not None
+        log.warning(
+            "BIODATA: recuperando sessao (login completo) e reabrindo Cadastro."
+        )
+        ensure_biodata_login(self._page, self.cfg, force_full=True)
+        self._cadastro_aberto = False
+        self._abrir_cadastro_pacientes()
 
     def buscar_por_id(self, id_paciente: str) -> Optional[PacienteDados]:
         """
-        Ainda não há campo de ID no diálogo Pesquisar Cliente mapeado.
-        Usa o código do formulário apenas se já estiver carregado; caso contrário,
-        retorna None para forçar revisão / busca por nome.
+        Busca no dialogo Pesquisar Cliente.
+        Se campo_busca_id nao mapeado, usa campo_busca_nome (Tom Select aceita o ID).
         """
+        return self.buscar_por_prontuario(id_paciente)
+
+    def buscar_por_prontuario(self, prontuario: str) -> Optional[PacienteDados]:
+        """Digita o prontuario/ID no dialogo (nao o nome) e abre o cadastro."""
+        pront = prontuario_so_digitos(prontuario) or (prontuario or "").strip()
+        if not pront:
+            return None
         self._ensure_browser()
         assert self._page is not None
         loc = self._loc()
-        # Sem diálogo de busca por ID: não inventar fluxo
-        if not loc.get("campo_busca_id"):
-            log.warning(
-                "Busca por ID não mapeada no diálogo; use ID_PACIENTE vazio e nome, "
-                "ou mapeie campo_busca_id."
-            )
+        campo_sel = loc.get("campo_busca_id") or loc.get("campo_busca_nome")
+        if not campo_sel:
+            log.warning("BIODATA: nenhum campo de busca configurado para prontuario.")
             return None
-        lista = self._buscar_lista_no_dialogo(
-            termo=id_paciente, campo_sel=loc["campo_busca_id"]
-        )
-        return lista[0] if len(lista) == 1 else None
 
-    def buscar_por_nome(self, nome: str) -> list[PacienteDados]:
+        log.info("BIODATA: buscando por prontuario=%s", pront)
+        lista = self._buscar_lista_no_dialogo(
+            termo=pront, campo_sel=campo_sel, prontuario_alvo=pront
+        )
+        if len(lista) == 1:
+            return lista[0]
+        if not lista:
+            log.warning(
+                "BIODATA: busca por prontuario %s vazia — "
+                "tentando login completo e nova busca.",
+                pront,
+            )
+            self._recuperar_sessao_e_cadastro()
+            lista = self._buscar_lista_no_dialogo(
+                termo=pront, campo_sel=campo_sel, prontuario_alvo=pront
+            )
+            return lista[0] if len(lista) == 1 else None
+        log.warning(
+            "BIODATA: prontuario %s retornou %s resultado(s) — ambiguo.",
+            pront,
+            len(lista),
+        )
+        return None
+
+    def buscar_por_nome(
+        self,
+        nome: str,
+        prontuario: Optional[str] = None,
+    ) -> list[PacienteDados]:
         self._ensure_browser()
+        campo_sel = self._loc()["campo_busca_nome"]
+        lista = self._buscar_lista_no_dialogo(
+            termo=nome, campo_sel=campo_sel, prontuario_alvo=prontuario
+        )
+        if lista:
+            return lista
+        log.warning(
+            "BIODATA: busca por nome vazia (%r) — "
+            "tentando login completo e nova busca.",
+            nome,
+        )
+        self._recuperar_sessao_e_cadastro()
         return self._buscar_lista_no_dialogo(
-            termo=nome, campo_sel=self._loc()["campo_busca_nome"]
+            termo=nome, campo_sel=campo_sel, prontuario_alvo=prontuario
         )
 
     def _localizar_opcoes_dropdown(self, termo: str):
@@ -381,7 +414,12 @@ class BiodataConnector:
             return None
         return alvo.first
 
-    def _buscar_lista_no_dialogo(self, termo: str, campo_sel: str) -> list[PacienteDados]:
+    def _buscar_lista_no_dialogo(
+        self,
+        termo: str,
+        campo_sel: str,
+        prontuario_alvo: Optional[str] = None,
+    ) -> list[PacienteDados]:
         assert self._page is not None
         self._abrir_dialogo_pesquisar_cliente(termo, campo_sel)
         opcao = self._localizar_opcoes_dropdown(termo)
@@ -394,6 +432,35 @@ class BiodataConnector:
         if count_opts == 1:
             dados = self._confirmar_opcao_e_extrair(opcao.first)
             return [dados] if dados else []
+
+        pront = prontuario_so_digitos(prontuario_alvo or "")
+        if pront:
+            for i in range(count_opts):
+                texto = (opcao.nth(i).inner_text() or "").strip()
+                if opcao_contem_prontuario(texto, pront):
+                    log.info(
+                        "Desambiguação por prontuario %s — opção %s/%s: %r",
+                        pront,
+                        i + 1,
+                        count_opts,
+                        texto[:80].replace("\n", " | "),
+                    )
+                    dados = self._confirmar_opcao_e_extrair(opcao.nth(i))
+                    if dados:
+                        atual = (dados.nome or "").strip()
+                        limpo = sanitizar_nome_opcao(atual or texto, pront)
+                        dados.nome = limpo or None
+                        if not (dados.id_paciente or "").strip():
+                            dados.id_paciente = pront
+                        return [dados]
+                    break
+            log.warning(
+                "Prontuario %s nao encontrado nas %s opcoes de %r — "
+                "fallback desambiguacao por CPF.",
+                pront,
+                count_opts,
+                termo,
+            )
 
         # Varios resultados: abrir cada ficha (ate 10) para ler CPF
         textos: list[str] = []
@@ -423,7 +490,17 @@ class BiodataConnector:
             dados = self._confirmar_opcao_e_extrair(alvo)
             if dados:
                 if not (dados.nome or "").strip():
-                    dados.nome = texto
+                    limpo = sanitizar_nome_opcao(texto)
+                    if limpo:
+                        dados.nome = limpo
+                else:
+                    # Se extracao trouxe so ID/prontuario, limpa
+                    limpo = sanitizar_nome_opcao(dados.nome or "")
+                    if limpo and limpo != (dados.nome or "").strip():
+                        dados.nome = limpo
+                    elif not limpo:
+                        limpo2 = sanitizar_nome_opcao(texto)
+                        dados.nome = limpo2 or None
                 resultados.append(dados)
                 tem_cpf = tem_cpf_valido(dados.cpf)
                 log.info(
@@ -455,6 +532,13 @@ class BiodataConnector:
         )
         return resultados
 
+    def ler_cadastro_aberto(self) -> PacienteDados:
+        """
+        Relê os campos do cadastro ja aberto na pagina (sem Pesquisar/prontuario).
+        """
+        self._ensure_browser()
+        return self._extrair_cadastro()
+
     def _extrair_cadastro(self) -> PacienteDados:
         assert self._page is not None
         loc = self._loc()
@@ -480,6 +564,21 @@ class BiodataConnector:
             value = (value or "").strip()
             return value or None
 
+        cep = normalizar_cep_biodata(text_of("campo_cep"))
+        endereco = text_of("campo_endereco")
+        bairro = text_of("campo_bairro")
+        ts_attrs = self._ler_attrs_item_cep_tomselect()
+        if ts_attrs:
+            cep, endereco, bairro = mesclar_endereco_tomselect_cep(
+                cep=cep,
+                endereco=endereco,
+                bairro=bairro,
+                data_value=ts_attrs.get("data-value"),
+                data_endereco=ts_attrs.get("data-endereco"),
+                data_bairro=ts_attrs.get("data-bairro"),
+                item_text=ts_attrs.get("text"),
+            )
+
         return PacienteDados(
             id_paciente=text_of("campo_id_paciente"),
             cpf=text_of("campo_cpf"),
@@ -488,11 +587,123 @@ class BiodataConnector:
             nome_mae=text_of("campo_nome_mae"),
             nascimento=text_of("campo_nascimento"),
             sexo=sexo_para_apac(text_of("campo_sexo")),
-            endereco=text_of("campo_endereco"),
+            endereco=endereco,
+            cep=cep,
+            logradouro=text_of("campo_logradouro"),
+            bairro=bairro,
+            numero=text_of("campo_numero"),
+            complemento=text_of("campo_complemento"),
         )
+
+    def _ler_attrs_item_cep_tomselect(self) -> Optional[dict[str, str]]:
+        """Le .item do Tom Select CEP (#cepCliente) — data-value/endereco/bairro."""
+        assert self._page is not None
+        page = self._page
+        item = page.locator(
+            "select#cepCliente + .ts-wrapper .ts-control .item, "
+            ".ts-wrapper:has(#cepCliente-ts-control) .ts-control .item"
+        ).last
+        try:
+            if item.count() == 0:
+                return None
+            attrs = item.evaluate(
+                """el => ({
+                    'data-value': el.getAttribute('data-value') || '',
+                    'data-endereco': el.getAttribute('data-endereco') || '',
+                    'data-bairro': el.getAttribute('data-bairro') || '',
+                    'text': (el.textContent || '').trim()
+                })"""
+            )
+            if not isinstance(attrs, dict):
+                return None
+            out = {k: str(v).strip() for k, v in attrs.items() if v}
+            return out or None
+        except Exception:
+            return None
+
+    def _sair_ao_finalizar_ativo(self) -> bool:
+        raw = self.cfg.biodata.get("sair_ao_finalizar", False)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "sim", "yes"}
+        return bool(raw)
+
+    def sair_para_login(self) -> None:
+        """
+        Logout UI: menu usuario (se houver) + Sair → tela de login.
+        Usado em testes com biodata.sair_ao_finalizar.
+        """
+        if self._page is None:
+            return
+        page = self._page
+        logout = dict(DEFAULT_LOGOUT_LOCATORS)
+        logout.update(
+            {
+                k: v
+                for k, v in (self.cfg.biodata.get("logout") or {}).items()
+                if v
+            }
+        )
+        locs = login_locators(self.cfg)
+        log.info("BIODATA: saindo para tela de login (Sair).")
+        try:
+            self._fechar_dialogo_pesquisa()
+        except Exception:
+            pass
+        _dismiss_blocking_overlays(page, self.cfg)
+        menu_sel = str(logout.get("menu_usuario") or "")
+        if menu_sel:
+            try:
+                menu = page.locator(menu_sel)
+                if menu.count() and menu.first.is_visible():
+                    menu.first.click(timeout=5000)
+                    page.wait_for_timeout(400)
+            except Exception as exc:
+                log.debug("Menu usuario logout: %s", exc)
+        botao_sel = str(
+            logout.get("botao_sair") or DEFAULT_LOGOUT_LOCATORS["botao_sair"]
+        )
+        clicou = False
+        try:
+            botao = page.get_by_role("button", name="Sair")
+            if botao.count():
+                # Evita Sair do modal Pesquisar Cliente: preferir o ultimo visivel
+                for i in range(botao.count() - 1, -1, -1):
+                    b = botao.nth(i)
+                    try:
+                        if b.is_visible():
+                            b.click(timeout=5000)
+                            clicou = True
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        if not clicou:
+            page.locator(botao_sel).last.click(timeout=8000)
+            clicou = True
+        page.wait_for_timeout(1000)
+        try:
+            page.locator(locs["campo_usuario"]).first.wait_for(
+                state="visible", timeout=10000
+            )
+            log.info("BIODATA: tela de login apos Sair.")
+        except Exception:
+            log.warning(
+                "BIODATA: Sair clicado, mas campo usuario nao confirmado."
+            )
 
     def close(self) -> None:
         try:
+            if self._sair_ao_finalizar_ativo() and self._page is not None:
+                try:
+                    self.sair_para_login()
+                except Exception as exc:
+                    log.warning(
+                        "BIODATA: falha ao sair para login ao finalizar: %s",
+                        exc,
+                    )
             if self._context is not None:
                 self._context.close()
         finally:
@@ -502,6 +713,86 @@ class BiodataConnector:
             if getattr(self, "_pw", None) is not None:
                 self._pw.stop()
                 self._pw = None
+
+
+def _titulo_reauth(cfg: Optional[AppConfig] = None) -> str:
+    if cfg is None:
+        return str(DEFAULT_REAUTH_LOCATORS["titulo"])
+    reauth = cfg.biodata.get("reauth") or {}
+    raw = str(reauth.get("titulo") or DEFAULT_REAUTH_LOCATORS["titulo"])
+    # Aceita valor legado "text=Autenticação" do config antigo
+    if raw.lower().startswith("text="):
+        return raw.split("=", 1)[1].strip()
+    return raw
+
+
+def modal_reauth_visivel(page, cfg: Optional[AppConfig] = None) -> bool:
+    """True se o modal Autenticação (reauth pos-token) estiver na tela."""
+    titulo = _titulo_reauth(cfg)
+    try:
+        if page.get_by_role("heading", name=titulo).count() > 0:
+            return True
+        if page.get_by_text(titulo, exact=False).count() > 0:
+            return True
+        dialog = page.get_by_role("dialog")
+        if dialog.count() and dialog.filter(has_text=titulo).count() > 0:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def tratar_reauth_se_necessario(page, cfg: AppConfig) -> None:
+    """
+    Modal Autenticação: usuario ja vem preenchido — digita so a senha,
+    clica LOGIN e recarrega (F5). Usado na abertura e no meio do fluxo.
+    """
+    if not modal_reauth_visivel(page, cfg):
+        return
+    reauth = cfg.biodata.get("reauth") or {}
+    titulo = _titulo_reauth(cfg)
+    log.info("Modal de reautenticação detectado; preenchendo senha.")
+    creds = load_biodata_credentials(cfg)
+    if creds is None:
+        input("Faça a autenticação no navegador e pressione Enter...")
+        return
+    senha_sel = str(
+        reauth.get("campo_senha")
+        or DEFAULT_REAUTH_LOCATORS["campo_senha"]
+    )
+    # No modal o campo Senha pode ser type=text
+    campo = page.get_by_role("textbox", name="Senha")
+    if campo.count():
+        campo.first.fill(creds.senha)
+    else:
+        page.locator(senha_sel).last.fill(creds.senha)
+    botao = page.get_by_role("button", name="Login")
+    if botao.count():
+        botao.first.click()
+    else:
+        page.locator(
+            str(reauth.get("botao_login") or DEFAULT_REAUTH_LOCATORS["botao_login"])
+        ).last.click()
+    page.wait_for_timeout(1500)
+    try:
+        page.get_by_role("heading", name=titulo).first.wait_for(
+            state="hidden", timeout=10000
+        )
+    except Exception:
+        pass
+    # Fluxo manual confirmado: senha → LOGIN → F5
+    log.info("Reauth LOGIN ok — recarregando pagina (F5).")
+    try:
+        page.reload(wait_until="domcontentloaded")
+    except Exception as exc:
+        log.warning("Reload apos reauth falhou: %s", exc)
+        return
+    page.wait_for_timeout(900)
+    if modal_reauth_visivel(page, cfg):
+        log.warning(
+            "Modal Autenticação ainda visivel apos F5 — "
+            "verifique senha em secrets.local.json."
+        )
 
 
 def login_locators(cfg: AppConfig) -> dict[str, str]:
@@ -551,6 +842,15 @@ def _pagina_autenticada(page, locs: dict[str, str]) -> bool:
     except Exception:
         return False
     return bool(_ja_logado(page, locs) or _menu_lateral_visivel(page))
+
+
+def _sessao_biodata_ok(page, cfg: AppConfig) -> bool:
+    """Sessao usavel: area logada e sem modal Autenticacao bloqueando."""
+    locs = login_locators(cfg)
+    return (
+        (_pagina_autenticada(page, locs) or _menu_lateral_visivel(page))
+        and not modal_reauth_visivel(page, cfg)
+    )
 
 
 def _escolher_pagina_ja_logada(context, locs: dict[str, str]):
@@ -617,9 +917,8 @@ def _recarregar_apos_application_error(page, cfg: AppConfig) -> None:
 def _abrir_ou_reusar_sessao(page, cfg: AppConfig) -> None:
     """
     Abre /home com o perfil persistente. Se a sessao de ~4h ainda vale,
-    nao faz login. So chama ensure_biodata_login se /home exigir autenticacao.
+    nao faz login. Se reauth (senha+LOGIN+F5) falhar, login completo em biodata.url.
     """
-    locs = login_locators(cfg)
     home = _url_home_biodata(cfg)
     if not home:
         raise BiodataMappingError(
@@ -637,12 +936,14 @@ def _abrir_ou_reusar_sessao(page, cfg: AppConfig) -> None:
         page.goto(str(url), wait_until="domcontentloaded")
 
     page.wait_for_timeout(800)
-    _dismiss_blocking_overlays(page)
+    _dismiss_blocking_overlays(page, cfg)
+    # Token expirado: modal Autenticacao (usuario fixo) — senha antes de achar sessao "ok"
+    tratar_reauth_se_necessario(page, cfg)
 
     if _tem_application_error(page):
         _recarregar_apos_application_error(page, cfg)
 
-    if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
+    if _sessao_biodata_ok(page, cfg):
         log.info("Sessão BIODATA válida — /home sem novo login.")
         return
 
@@ -655,25 +956,33 @@ def _abrir_ou_reusar_sessao(page, cfg: AppConfig) -> None:
             }""",
             timeout=5000,
         )
-        _dismiss_blocking_overlays(page)
-        if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
+        _dismiss_blocking_overlays(page, cfg)
+        tratar_reauth_se_necessario(page, cfg)
+        if _sessao_biodata_ok(page, cfg):
             log.info("Sessão BIODATA válida — /home sem novo login.")
             return
     except Exception:
         pass
 
-    log.info("Sessão BIODATA nao confirmada em /home — seguindo para login.")
-    ensure_biodata_login(page, cfg)
+    log.info(
+        "Sessão BIODATA nao confirmada apos reauth — "
+        "voltando a tela de login (fluxo completo)."
+    )
+    ensure_biodata_login(page, cfg, force_full=True)
 
-    # Apos login (ou falha parcial), garantir area logada via /home
-    if not (_pagina_autenticada(page, locs) or _menu_lateral_visivel(page)):
-        try:
-            page.goto(home, wait_until="domcontentloaded")
-            page.wait_for_timeout(800)
-            _dismiss_blocking_overlays(page)
-        except Exception as exc:
-            log.warning("Retry /home apos login falhou: %s", exc)
-    if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
+    if _sessao_biodata_ok(page, cfg):
+        log.info("Sessão BIODATA confirmada apos login completo.")
+        return
+
+    # Ultimo retry: /home + reauth leve (sem loop de force_full)
+    try:
+        page.goto(home, wait_until="domcontentloaded")
+        page.wait_for_timeout(800)
+        _dismiss_blocking_overlays(page, cfg)
+        tratar_reauth_se_necessario(page, cfg)
+    except Exception as exc:
+        log.warning("Retry /home apos login falhou: %s", exc)
+    if _sessao_biodata_ok(page, cfg):
         log.info("Sessão BIODATA confirmada apos login/home.")
         return
     raise BiodataMappingError(
@@ -682,81 +991,119 @@ def _abrir_ou_reusar_sessao(page, cfg: AppConfig) -> None:
     )
 
 
-def ensure_biodata_login(page, cfg: AppConfig) -> None:
+def ensure_biodata_login(
+    page, cfg: AppConfig, *, force_full: bool = False
+) -> None:
     locs = login_locators(cfg)
-    _dismiss_blocking_overlays(page)
-    page.wait_for_timeout(500)
 
-    if _tem_application_error(page):
-        _recarregar_apos_application_error(page, cfg)
-
-    # Sessão já autenticada: home / menu lateral (inputs de login podem existir ocultos no DOM)
-    if _pagina_autenticada(page, locs):
-        log.info("Sessão BIODATA já autenticada — sem novo login.")
-        return
-
-    campo = page.locator(locs["campo_usuario"]).first
-    try:
-        precisa_login = campo.is_visible(timeout=2500) and campo.is_enabled()
-    except Exception:
-        precisa_login = False
-
-    if not precisa_login:
-        # Pode estar redirecionando para /home ou /consultorio (menu lateral nem sempre visível)
-        try:
-            page.wait_for_function(
-                """() => {
-                  const p = (location.pathname || '').toLowerCase();
-                  return p.includes('/home') || p.includes('/consultorio');
-                }""",
-                timeout=8000,
+    if force_full:
+        url_login = (cfg.biodata or {}).get("url")
+        if not url_login:
+            raise BiodataMappingError(
+                "biodata.url e obrigatorio para login completo."
             )
-            log.info("Sessão BIODATA já autenticada.")
-            return
-        except Exception:
-            pass
+        log.info("Login completo: abrindo tela de login %s", url_login)
+        page.goto(str(url_login), wait_until="domcontentloaded")
+        page.wait_for_timeout(800)
+        _dismiss_blocking_overlays(page, cfg)
+        if _tem_application_error(page):
+            _recarregar_apos_application_error(page, cfg)
         try:
-            page.wait_for_selector("#menuLateral", state="visible", timeout=3000)
-            log.info("Sessão BIODATA já autenticada.")
+            page.locator(locs["campo_usuario"]).first.wait_for(
+                state="visible", timeout=15000
+            )
+        except Exception as exc:
+            raise BiodataMappingError(
+                "Tela de login BIODATA nao exibiu campo usuario. "
+                f"Verifique biodata.url ({url_login})."
+            ) from exc
+        precisa_login = True
+    else:
+        # Modal reauth (senha) antes do formulario completo de login
+        tratar_reauth_se_necessario(page, cfg)
+        if _sessao_biodata_ok(page, cfg):
+            log.info("Sessão BIODATA já autenticada — sem novo login.")
             return
+        _dismiss_blocking_overlays(page, cfg)
+        page.wait_for_timeout(500)
+
+        if _tem_application_error(page):
+            _recarregar_apos_application_error(page, cfg)
+
+        # Sessão já autenticada: home / menu lateral (inputs de login podem existir ocultos no DOM)
+        if _pagina_autenticada(page, locs) and not modal_reauth_visivel(page, cfg):
+            log.info("Sessão BIODATA já autenticada — sem novo login.")
+            return
+
+        campo = page.locator(locs["campo_usuario"]).first
+        try:
+            precisa_login = campo.is_visible(timeout=2500) and campo.is_enabled()
         except Exception:
             precisa_login = False
 
-    if not precisa_login:
-        if _tem_application_error(page):
-            _recarregar_apos_application_error(page, cfg)
-            campo = page.locator(locs["campo_usuario"]).first
+        if not precisa_login:
+            # Pode estar redirecionando para /home ou /consultorio
             try:
-                precisa_login = campo.is_visible(timeout=4000) and campo.is_enabled()
+                page.wait_for_function(
+                    """() => {
+                      const p = (location.pathname || '').toLowerCase();
+                      return p.includes('/home') || p.includes('/consultorio');
+                    }""",
+                    timeout=8000,
+                )
+                log.info("Sessão BIODATA já autenticada.")
+                return
+            except Exception:
+                pass
+            try:
+                page.wait_for_selector("#menuLateral", state="visible", timeout=3000)
+                log.info("Sessão BIODATA já autenticada.")
+                return
             except Exception:
                 precisa_login = False
-        # Preferir /home (sessao) em vez de forcar URL de login
-        home = _url_home_biodata(cfg)
-        if not precisa_login and home:
-            try:
-                page.goto(home, wait_until="domcontentloaded")
-                page.wait_for_timeout(1000)
-                _dismiss_blocking_overlays(page)
-            except Exception as exc:
-                log.warning("ensure_biodata_login: falha ao abrir home: %s", exc)
+
+        if not precisa_login:
             if _tem_application_error(page):
                 _recarregar_apos_application_error(page, cfg)
-            if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
-                log.info("Sessão BIODATA já autenticada — sem novo login.")
-                return
-            campo = page.locator(locs["campo_usuario"]).first
-            try:
-                precisa_login = campo.is_visible(timeout=4000) and campo.is_enabled()
-            except Exception:
-                precisa_login = False
-        if not precisa_login:
-            if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
-                log.info("Sessão BIODATA já autenticada — sem novo login.")
-                return
-            raise BiodataMappingError(
-                "Não foi possível entrar no BIODATA (login indisponível e sessão não confirmada). "
-                "Feche outras abas/sessões do BIODATA e tente novamente."
-            )
+                campo = page.locator(locs["campo_usuario"]).first
+                try:
+                    precisa_login = (
+                        campo.is_visible(timeout=4000) and campo.is_enabled()
+                    )
+                except Exception:
+                    precisa_login = False
+            # Preferir /home (sessao) em vez de forcar URL de login
+            home = _url_home_biodata(cfg)
+            if not precisa_login and home:
+                try:
+                    page.goto(home, wait_until="domcontentloaded")
+                    page.wait_for_timeout(1000)
+                    _dismiss_blocking_overlays(page, cfg)
+                except Exception as exc:
+                    log.warning(
+                        "ensure_biodata_login: falha ao abrir home: %s", exc
+                    )
+                if _tem_application_error(page):
+                    _recarregar_apos_application_error(page, cfg)
+                if _sessao_biodata_ok(page, cfg):
+                    log.info("Sessão BIODATA já autenticada — sem novo login.")
+                    return
+                campo = page.locator(locs["campo_usuario"]).first
+                try:
+                    precisa_login = (
+                        campo.is_visible(timeout=4000) and campo.is_enabled()
+                    )
+                except Exception:
+                    precisa_login = False
+            if not precisa_login:
+                if _sessao_biodata_ok(page, cfg):
+                    log.info("Sessão BIODATA já autenticada — sem novo login.")
+                    return
+                raise BiodataMappingError(
+                    "Não foi possível entrar no BIODATA "
+                    "(login indisponível e sessão não confirmada). "
+                    "Feche outras abas/sessões do BIODATA e tente novamente."
+                )
 
     # Última checagem: nunca preencher login se a sessão voltou no meio do fluxo
     if _pagina_autenticada(page, locs):
@@ -941,7 +1288,10 @@ def _aguardar_login_ok(page, locs: dict[str, str], timeout: int) -> None:
     )
 
 
-def _dismiss_blocking_overlays(page) -> None:
+def _dismiss_blocking_overlays(page, cfg: Optional[AppConfig] = None) -> None:
+    # Escape cancela o modal Autenticacao — nao dismiss enquanto estiver aberto
+    if modal_reauth_visivel(page, cfg):
+        return
     try:
         page.keyboard.press("Escape")
     except Exception:
@@ -993,6 +1343,39 @@ def _is_input(locator) -> bool:
         return str(name).lower() in {"input", "textarea", "select"}
     except Exception:
         return False
+
+
+def normalizar_cep_biodata(valor: Optional[str]) -> Optional[str]:
+    """Extrai CEP de 8 digitos (ou None)."""
+    if not valor:
+        return None
+    digitos = "".join(ch for ch in str(valor) if ch.isdigit())
+    if len(digitos) >= 8:
+        return digitos[:8]
+    return None
+
+
+def mesclar_endereco_tomselect_cep(
+    *,
+    cep: Optional[str],
+    endereco: Optional[str],
+    bairro: Optional[str],
+    data_value: Optional[str] = None,
+    data_endereco: Optional[str] = None,
+    data_bairro: Optional[str] = None,
+    item_text: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Completa cep/endereco/bairro a partir do .item Tom Select do CEP.
+    Nao sobrescreve valores ja presentes.
+    """
+    if not cep:
+        cep = normalizar_cep_biodata(data_value) or normalizar_cep_biodata(item_text)
+    if not (endereco or "").strip() and (data_endereco or "").strip():
+        endereco = str(data_endereco).strip()
+    if not (bairro or "").strip() and (data_bairro or "").strip():
+        bairro = str(data_bairro).strip()
+    return cep, endereco, bairro
 
 
 def open_biodata_session(cfg: AppConfig) -> None:

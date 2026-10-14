@@ -19,6 +19,11 @@
       "campo_senha": "input[type='password'], input[name='password']",
       "botao_login": "button:has-text('Login')"
     },
+    "sair_ao_finalizar": true,
+    "logout": {
+      "menu_usuario": "text=Usuário:",
+      "botao_sair": "button:has-text('Sair')"
+    },
     "navegacao": {
       "modulo_atendimento": "#menuLateral [aria-label=\"Atendimento\"] button",
       "campo_busca_menu": "input[placeholder=\"Pesquisar tela...\"]",
@@ -39,7 +44,12 @@
       "campo_nome_mae": "input[name='mae']",
       "campo_nascimento": "#nascimentoCadastroId",
       "campo_sexo": "select[name='sexo'], input[name='sexo'], #sexoCadastroId",
-      "campo_endereco": "input[name='endereco']"
+      "campo_endereco": "input[name='endereco']",
+      "campo_cep": "select#cepCliente, select[name='cepCliente']",
+      "campo_logradouro": "input[name='logradouro'], select[name='tipoLogradouro'], input[name='tipoLogradouro']",
+      "campo_bairro": "input[name='bairro']",
+      "campo_numero": "input[name='numero']",
+      "campo_complemento": "input[name='complemento']"
     }
   },
   "planilha": {
@@ -56,6 +66,15 @@
       "ID_PACIENTE": "ID_PACIENTE"
     }
   },
+  "planilha_prontuarios": {
+    "caminho": "data/PLANILHA DE APAC E AIH 09.2026.xlsx",
+    "aba": "APAC ",
+    "linha_cabecalho": 3,
+    "colunas": {
+      "PRONTUARIO": "Prontuário",
+      "CLIENTE": "Cliente"
+    }
+  },
   "normalizacao": {
     "numeracao": {
       "hifen_para_barra": true,
@@ -69,7 +88,16 @@
   "dados_fixos": {
     "cnes_solicitante": "6618839",
     "cnes_executante": "6618839",
-    "tipo_apac": "3"
+    "tipo_apac": "3",
+    "codigo_procedimento": "0405050372",
+    "cbo": "225265",
+    "quantidade_procedimento": "1",
+    "cns_executante": "701003891196892",
+    "motivo_saida": "12",
+    "carater_atend": "01",
+    "medico_solicitante_nome": "ORCELIO REZENDE",
+    "autorizador_nome": "MARQUES HENRIQUE MARTINS FEITO",
+    "cod_orgao_emiss": "M211130001"
   },
   "apac": {
     "titulo_janela": "APAC MAGNETICO",
@@ -89,7 +117,7 @@
     "confirmar_navegacao_inicial": false,
     "velocidade": "rapido",
     "intervalo_enter_navegacao_s": 0.8,
-    "paciente_inicio": "ELMO CASTELO BRANCO DE LEMOS",
+    "paciente_inicio": "SANDRA MARIA PEREIRA SILVA",
     "passos": []
   },
   "timeouts": {

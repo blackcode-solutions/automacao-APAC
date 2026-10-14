@@ -8,6 +8,8 @@ from typing import Optional
 
 from apac_bot.models import EstadoLancamento, Lancamento
 
+MOTIVO_ENTRADA_ALTERADA = "entrada alterada desde a última execução"
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -153,7 +155,29 @@ class ProgressStore:
         if rec.estado == EstadoLancamento.SALVAMENTO_INCERTO or rec.precisa_reconciliar:
             return True, "salvamento incerto — reconcilie no APAC antes de retomar"
         if rec.hash_entrada != lanc.hash_entrada():
-            return False, "entrada alterada desde a última execução"
+            return False, MOTIVO_ENTRADA_ALTERADA
         if rec.estado == EstadoLancamento.AGUARDANDO_REVISAO:
             return True, "aguardando revisão"
         return False, None
+
+
+def filtrar_pendentes_lote(
+    lancamentos: list[Lancamento],
+    store: ProgressStore,
+) -> tuple[list[Lancamento], list[tuple[Lancamento, str]], list[Lancamento]]:
+    """
+    Separa a fila em pendentes (a processar) e pulados (com motivo).
+    Terceiro retorno: subset de pendentes com entrada alterada (reprocessar).
+    """
+    pendentes: list[Lancamento] = []
+    pulados: list[tuple[Lancamento, str]] = []
+    alterados: list[Lancamento] = []
+    for lanc in lancamentos:
+        pular, motivo = store.deve_pular(lanc)
+        if pular:
+            pulados.append((lanc, motivo or "pular"))
+            continue
+        if motivo == MOTIVO_ENTRADA_ALTERADA:
+            alterados.append(lanc)
+        pendentes.append(lanc)
+    return pendentes, pulados, alterados

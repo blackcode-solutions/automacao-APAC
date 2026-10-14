@@ -5,7 +5,12 @@ import pytest
 from openpyxl import Workbook
 
 from apac_bot.config import AppConfig
-from apac_bot.sheet import create_example_workbook, load_lancamentos
+from apac_bot.sheet import (
+    SheetError,
+    create_example_workbook,
+    listar_lancamentos_a_partir,
+    load_lancamentos,
+)
 
 
 @pytest.fixture
@@ -89,6 +94,22 @@ def test_linha_cabecalho_customizada(tmp_path: Path):
     assert result.ok
     assert len(result.lancamentos) == 1
     assert result.lancamentos[0].codigo_original == "04123"
+
+
+def test_listar_lancamentos_a_partir_meio_da_fila(cfg_tmp: AppConfig):
+    nomes = [l.paciente_nome for l in load_lancamentos(cfg_tmp).lancamentos]
+    assert len(nomes) >= 3
+    inicio = nomes[1]
+    cfg_tmp.raw.setdefault("apac", {})["paciente_inicio"] = inicio
+    fila = listar_lancamentos_a_partir(cfg_tmp)
+    assert [l.paciente_nome for l in fila] == nomes[1:]
+    assert len(fila) == len(nomes) - 1
+
+
+def test_listar_lancamentos_a_partir_paciente_inexistente(cfg_tmp: AppConfig):
+    cfg_tmp.raw.setdefault("apac", {})["paciente_inicio"] = "NOME QUE NAO EXISTE"
+    with pytest.raises(SheetError, match="não encontrado"):
+        listar_lancamentos_a_partir(cfg_tmp)
 
 
 def test_apenas_ativos_ignora_linhas_ocultas(tmp_path: Path):

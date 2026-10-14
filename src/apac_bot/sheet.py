@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -10,9 +13,78 @@ from apac_bot.config import AppConfig, config_dir, resolve_path
 from apac_bot.models import Lancamento
 from apac_bot.normalize import cell_as_text, normalize_codigo, normalize_numeracao, optional_text
 
+log = logging.getLogger(__name__)
+
 
 class SheetError(Exception):
     pass
+
+
+def _sem_acento(texto: str) -> str:
+    t = unicodedata.normalize("NFKD", texto or "")
+    return "".join(ch for ch in t if not unicodedata.combining(ch))
+
+
+def nome_chave_prontuario(nome: str) -> str:
+    """Chave estavel para cruzar PACIENTE <-> Cliente (casefold, espacos colapsados)."""
+    return " ".join(_sem_acento(nome).casefold().split())
+
+
+def prontuario_so_digitos(valor: Any) -> str:
+    return "".join(ch for ch in cell_as_text(valor) if ch.isdigit())
+
+
+def opcao_contem_prontuario(texto_opcao: str, prontuario: str) -> bool:
+    """True se o texto da opcao do dropdown contem o prontuario como token numerico."""
+    alvo = prontuario_so_digitos(prontuario)
+    if not alvo:
+        return False
+    digitos = "".join(ch for ch in (texto_opcao or "") if ch.isdigit() or ch.isspace())
+    # Tambem busca no texto bruto (ID pode aparecer colado ao nome)
+    if re.search(rf"(?<!\d){re.escape(alvo)}(?!\d)", texto_opcao or ""):
+        return True
+    return bool(re.search(rf"(?<!\d){re.escape(alvo)}(?!\d)", digitos))
+
+
+def sanitizar_nome_opcao(
+    texto_opcao: str,
+    prontuario: Optional[str] = None,
+) -> str:
+    """
+    Extrai o nome legivel do texto da opcao do dropdown BIODATA.
+    Remove prefixo de prontuario/ID. Retorna '' se sobrar so digitos.
+    """
+    t = " ".join((texto_opcao or "").replace("\n", " ").split())
+    if not t:
+        return ""
+    pront = prontuario_so_digitos(prontuario or "")
+    if pront:
+        # Remove o prontuario como token (inicio ou no meio)
+        t2 = re.sub(rf"(?<!\d){re.escape(pront)}(?!\d)", " ", t)
+        t2 = " ".join(t2.split())
+        if t2 and not t2.isdigit():
+            t = t2
+    # Prefixo numerico generico: "1763812 SANDRA MARIA" → "SANDRA MARIA"
+    m = re.match(r"^\d{4,}\s+(.+)$", t)
+    if m:
+        t = m.group(1).strip()
+    # So digitos = prontuario puro — invalido como nome
+    if not t or t.isdigit() or re.fullmatch(r"[\d\s.\-/]+", t):
+        return ""
+    return t
+
+
+def nome_mae_valido(nome_mae: Optional[str], paciente_nome: Optional[str]) -> bool:
+    """False se mae vazia ou igual ao nome do paciente (contaminacao)."""
+    mae = " ".join((nome_mae or "").split())
+    if not mae:
+        return False
+    pac = " ".join((paciente_nome or "").split())
+    if pac and nome_chave_prontuario(mae) == nome_chave_prontuario(pac):
+        return False
+    if mae.isdigit():
+        return False
+    return True
 
 
 @dataclass
@@ -26,12 +98,120 @@ class SheetValidation:
         return not self.erros
 
 
-def resolver_lancamento_inicio(
+def carregar_mapa_prontuario(cfg: AppConfig) -> dict[str, str]:
+    """
+    Le planilha_prontuarios (Cliente -> Prontuario).
+    Retorna dict vazio se nao configurado ou arquivo ausente.
+    """
+    bloco = cfg.planilha_prontuarios
+    if not bloco or not bloco.get("caminho"):
+        return {}
+
+    caminho = resolve_path(config_dir(cfg), Path(str(bloco["caminho"])))
+    if not caminho.is_file():
+        log.warning("planilha_prontuarios nao encontrada: %s", caminho)
+        return {}
+
+    aba = str(bloco.get("aba") or "APAC ").strip() or "APAC "
+    # Aba no Excel pode ter espaco final ("APAC ")
+    aba_cfg = str(bloco.get("aba") or "APAC ")
+    try:
+        header_row = int(bloco.get("linha_cabecalho") or 3)
+    except (TypeError, ValueError):
+        header_row = 3
+    colunas = dict(bloco.get("colunas") or {})
+    rotulo_pront = str(colunas.get("PRONTUARIO") or "Prontuário")
+    rotulo_cli = str(colunas.get("CLIENTE") or "Cliente")
+
+    wb = load_workbook(caminho, read_only=True, data_only=True)
+    try:
+        ws = None
+        for nome in wb.sheetnames:
+            if nome == aba_cfg or nome.strip() == aba or nome.casefold() == aba_cfg.casefold():
+                ws = wb[nome]
+                break
+        if ws is None:
+            log.warning(
+                "Aba prontuarios %r nao encontrada em %s (abas=%s)",
+                aba_cfg,
+                caminho.name,
+                wb.sheetnames,
+            )
+            return {}
+
+        headers_raw = []
+        for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+            if i == header_row:
+                headers_raw = list(row or ())
+                break
+        if not headers_raw:
+            log.warning("Cabecalho prontuarios vazio (linha %s)", header_row)
+            return {}
+
+        def _hdr_key(h: Any) -> str:
+            return nome_chave_prontuario(cell_as_text(h))
+
+        alvo_pront = _hdr_key(rotulo_pront)
+        alvo_cli = _hdr_key(rotulo_cli)
+        idx_pront = idx_cli = None
+        for j, h in enumerate(headers_raw):
+            k = _hdr_key(h)
+            if k == alvo_pront or k.startswith("prontuario"):
+                idx_pront = j
+            if k == alvo_cli or k == "cliente":
+                idx_cli = j
+        if idx_pront is None or idx_cli is None:
+            log.warning(
+                "Colunas Prontuario/Cliente nao achadas no cabecalho %s",
+                [cell_as_text(h) for h in headers_raw],
+            )
+            return {}
+
+        mapa: dict[str, str] = {}
+        for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+            if not row:
+                continue
+            pront = prontuario_so_digitos(row[idx_pront] if idx_pront < len(row) else "")
+            nome = cell_as_text(row[idx_cli] if idx_cli < len(row) else "").strip()
+            if not pront or not nome:
+                continue
+            chave = nome_chave_prontuario(nome)
+            if chave in mapa and mapa[chave] != pront:
+                log.warning(
+                    "Prontuario duplicado para %r: mantendo %s (ignorando %s)",
+                    nome,
+                    mapa[chave],
+                    pront,
+                )
+                continue
+            if chave not in mapa:
+                mapa[chave] = pront
+        log.info("Mapa prontuarios: %s nome(s) carregado(s) de %s", len(mapa), caminho.name)
+        return mapa
+    finally:
+        wb.close()
+
+
+def enriquecer_prontuario(lanc: Lancamento, mapa: dict[str, str]) -> Lancamento:
+    """Preenche lanc.prontuario pelo nome se ainda vazio."""
+    if lanc.prontuario:
+        return lanc
+    if not mapa:
+        return lanc
+    chave = nome_chave_prontuario(lanc.paciente_nome or "")
+    pront = mapa.get(chave)
+    if pront:
+        lanc.prontuario = pront
+    return lanc
+
+
+def listar_lancamentos_a_partir(
     cfg: AppConfig,
     planilha_override: Optional[Path] = None,
-) -> Lancamento:
+) -> list[Lancamento]:
     """
-    Localiza o lançamento de partida por apac.paciente_inicio (nome exato, case-insensitive).
+    Lancamentos ativos a partir de apac.paciente_inicio (nome exato, case-insensitive),
+    inclusive ate o fim da planilha.
     """
     nome_alvo = (cfg.apac.get("paciente_inicio") or "").strip()
     if not nome_alvo:
@@ -48,14 +228,28 @@ def resolver_lancamento_inicio(
         raise SheetError("Planilha sem lançamentos ativos.")
 
     alvo_norm = nome_alvo.casefold()
-    for lanc in result.lancamentos:
+    idx: Optional[int] = None
+    for i, lanc in enumerate(result.lancamentos):
         if (lanc.paciente_nome or "").strip().casefold() == alvo_norm:
-            return lanc
+            idx = i
+            break
 
-    raise SheetError(
-        f"Paciente início '{nome_alvo}' não encontrado na planilha "
-        f"({len(result.lancamentos)} lançamento(s) ativos)."
-    )
+    if idx is None:
+        raise SheetError(
+            f"Paciente início '{nome_alvo}' não encontrado na planilha "
+            f"({len(result.lancamentos)} lançamento(s) ativos)."
+        )
+    return result.lancamentos[idx:]
+
+
+def resolver_lancamento_inicio(
+    cfg: AppConfig,
+    planilha_override: Optional[Path] = None,
+) -> Lancamento:
+    """
+    Localiza o lançamento de partida por apac.paciente_inicio (nome exato, case-insensitive).
+    """
+    return listar_lancamentos_a_partir(cfg, planilha_override)[0]
 
 
 def _header_map(ws, header_row: int = 1) -> dict[str, int]:
@@ -204,6 +398,12 @@ def load_lancamentos(cfg: AppConfig, planilha_override: Optional[Path] = None) -
         )
 
     wb.close()
+
+    mapa = carregar_mapa_prontuario(cfg)
+    if mapa:
+        for lanc in lancamentos:
+            enriquecer_prontuario(lanc, mapa)
+
     return SheetValidation(lancamentos, erros, avisos)
 
 
