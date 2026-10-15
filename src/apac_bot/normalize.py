@@ -155,3 +155,40 @@ def tipo_logradouro_do_endereco(endereco: Optional[str]) -> Optional[str]:
                 return "AVENIDA"
             return tipo
     return None
+
+
+# Limite do campo NOME / NOME DA MAE no APAC Magnético (medido: 31º char vaza).
+APAC_MAX_NOME = 30
+
+
+def abreviar_nome_apac(nome: str, max_len: int = APAC_MAX_NOME) -> str:
+    """
+    Encaixa o nome no limite do Magnético abreviando do ultimo sobrenome para tras.
+    Ex.: CLAUDIA MARQUILENE SILVA CUTRIM (31) -> CLAUDIA MARQUILENE SILVA C (26).
+    Se ainda passar (1º nome sozinho > max_len), corta em max_len.
+    """
+    t = " ".join((nome or "").split())
+    if not t:
+        return ""
+    t = _sem_acento_upper(t)
+    if max_len <= 0:
+        return ""
+    if len(t) <= max_len:
+        return t
+
+    partes = t.split(" ")
+    # Abrevia do ultimo token para o primeiro (exceto o 1º nome)
+    while len(" ".join(partes)) > max_len:
+        encurtou = False
+        for i in range(len(partes) - 1, 0, -1):
+            if len(partes[i]) > 1:
+                partes[i] = partes[i][0]
+                encurtou = True
+                break
+        if not encurtou:
+            break
+
+    resultado = " ".join(partes)
+    if len(resultado) > max_len:
+        return resultado[:max_len]
+    return resultado

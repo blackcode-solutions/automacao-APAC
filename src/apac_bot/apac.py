@@ -121,6 +121,8 @@ _ROTULO_PARA_CAMPO: dict[str, CampoApac] = {
 from apac_bot.logging_safe import setup_logging
 from apac_bot.models import EstadoLancamento, Lancamento
 from apac_bot.normalize import (
+    APAC_MAX_NOME,
+    abreviar_nome_apac,
     nascimento_ddmmaaaa,
     sexo_para_apac,
     tipo_logradouro_do_endereco,
@@ -2020,18 +2022,38 @@ class ApacAutomator:
         val = getattr(pac, attr, None) if pac else None
         return (str(val).strip() or None) if val else None
 
+    def _aplicar_limite_nome_apac(self, nome: str, *, rotulo: str) -> str:
+        """Abrevia sobrenomes se passar do limite do Magnético; loga se encurtou."""
+        original = " ".join((nome or "").split())
+        if not original:
+            return ""
+        completo = abreviar_nome_apac(original, max_len=10_000)
+        curto = abreviar_nome_apac(original, APAC_MAX_NOME)
+        if curto != completo:
+            log.info(
+                "%s: nome %r (%s chars) abreviado para %r (limite %s)",
+                rotulo,
+                completo[:80],
+                len(completo),
+                curto,
+                APAC_MAX_NOME,
+            )
+        return curto
+
     def _nome_para_digitar_apac(self, lanc: Lancamento) -> Optional[str]:
         """Preferir nome da planilha; senao BIODATA sanitizado (nunca prontuario)."""
         from apac_bot.sheet import sanitizar_nome_opcao
 
         planilha = (lanc.paciente_nome or "").strip()
         if planilha and not planilha.isdigit():
-            return planilha
+            return self._aplicar_limite_nome_apac(planilha, rotulo="NOME")
         bruto = self._valor_biodata_ou_refrescar(lanc, "nome", rotulo="NOME")
         if not bruto:
             return None
         limpo = sanitizar_nome_opcao(bruto, lanc.prontuario)
-        return limpo or None
+        if not limpo:
+            return None
+        return self._aplicar_limite_nome_apac(limpo, rotulo="NOME")
 
     def _nome_mae_para_digitar_apac(self, lanc: Lancamento) -> Optional[str]:
         """Mae do BIODATA; rejeita vazio ou igual ao nome do paciente."""
@@ -2042,7 +2064,9 @@ class ApacAutomator:
             lanc, "nome_mae", rotulo="NOME DA MAE"
         )
         if nome_mae_valido(mae, pac_nome):
-            return (mae or "").strip()
+            return self._aplicar_limite_nome_apac(
+                (mae or "").strip(), rotulo="NOME DA MAE"
+            )
         # Refresh ja pode ter ocorrido em _valor_biodata; tenta de novo se connector
         if self._biodata_connector is not None and not nome_mae_valido(mae, pac_nome):
             refrescar_paciente_biodata(self._biodata_connector, lanc)
@@ -2050,7 +2074,9 @@ class ApacAutomator:
                 (lanc.paciente.nome_mae or "").strip() if lanc.paciente else None
             )
         if nome_mae_valido(mae, pac_nome):
-            return (mae or "").strip()
+            return self._aplicar_limite_nome_apac(
+                (mae or "").strip(), rotulo="NOME DA MAE"
+            )
         return None
 
     def aceitar_nome_se_preenchido(self, lanc: Lancamento) -> None:
@@ -2062,7 +2088,7 @@ class ApacAutomator:
             lanc,
             rotulo="NOME",
             flag_attr="_nome_aceito",
-            max_chars=120,
+            max_chars=APAC_MAX_NOME,
             vazio_digita=digita if digita else "",
             marcar_cpf_preencheu_se_lido=True,
         )
@@ -2080,7 +2106,7 @@ class ApacAutomator:
             lanc,
             rotulo="NOME DA MAE",
             flag_attr="_nome_mae_aceito",
-            max_chars=120,
+            max_chars=APAC_MAX_NOME,
             vazio_digita=digita if digita else "",
         )
 
@@ -2257,10 +2283,37 @@ class ApacAutomator:
         self._enviar_tab(hwnd)
         self._pausa("pos_tab_apos_aceitar")
 
+    def _cursor_ja_passou_logradouro(self) -> Optional[CampoApac]:
+        """
+        Fluxo ja cadastrado no APAC: apos CEP o Magnético pode pular LOGRADOURO
+        e cair em ENDERECO/NUMERO/…. Retorna o campo atual se ja passou.
+        """
+        try:
+            campo, _linha, _cx = identificar_campo_cursor(self._pids_apac())
+        except ConsoleScreenError:
+            return None
+        posteriores = {
+            CampoApac.ENDERECO,
+            CampoApac.NUMERO,
+            CampoApac.COMPLEMENTO,
+            CampoApac.BAIRRO,
+            CampoApac.TELEFONE,
+            CampoApac.EMAIL,
+            CampoApac.NASCIMENTO,
+            CampoApac.SEXO,
+            CampoApac.ETNIA_RACA,
+            CampoApac.MUNICIPIO,
+        }
+        if campo in posteriores:
+            return campo
+        return None
+
     def aceitar_logradouro_se_preenchido(self, lanc: Lancamento) -> None:
         """
-        Apos CEP: Tab se LOGRADOURO ja tem codigo; se vazio, F1 com tipo
-        detectado no Endereco BIODATA (RUA/TRAVESSA…); sem tipo → Tab.
+        Dois fluxos apos CEP:
+        - Ja cadastrado no APAC: Magnético pode ja estar em ENDERECO → so segue.
+        - Cadastro novo: Tab se LOGRADOURO tem codigo; vazio → F1 pelo tipo
+          do endereco BIODATA; sem tipo → Tab.
         """
         if self._logradouro_aceito:
             return
@@ -2288,6 +2341,17 @@ class ApacAutomator:
         self._pausa("pre_campo")
         aguardar_enter_solto()
         hwnd = self._ativar_janela_apac(clicar_centro=False)
+
+        # Fluxo cadastrado: CEP ja avancou alem do LOGRADOURO
+        passou = self._cursor_ja_passou_logradouro()
+        if passou is not None:
+            log.info(
+                "LOGRADOURO: Magnético ja em %s (paciente ja no APAC) — seguindo.",
+                passou.value,
+            )
+            self._logradouro_aceito = True
+            return
+
         linha_gate = self.exigir_campo(CampoApac.LOGRADOURO, passo="LOGRADOURO")
         bruto = (
             extrair_valor_campo_linha(linha_gate, campo=CampoApac.LOGRADOURO)

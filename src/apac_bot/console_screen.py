@@ -685,8 +685,13 @@ def campo_compativel(
         "CEP" in upper
         or (_RE_CEP_INICIO.match(_linha_limpa_campo(linha)) and "LOGRADOURO" in upper)
     ):
+        # Linha CEP+LOGRADOURO: so com cx no CEP (evita Tab extra falso)
+        if "LOGRADOURO" in upper:
+            return atual == CampoApac.CEP
         return True
     if esperado == CampoApac.LOGRADOURO and "LOGRADOURO" in upper:
+        if "CEP" in upper:
+            return atual == CampoApac.LOGRADOURO
         return True
     if esperado == CampoApac.COMPLEMENTO and "COMPLEMENTO" in upper:
         return True
@@ -695,6 +700,9 @@ def campo_compativel(
             return atual == CampoApac.BAIRRO
         return True
     if esperado == CampoApac.ENDERECO and _tem("ENDERECO", "ENDEREÇO"):
+        # Linha ENDERECO+NUMERO: so com cx no ENDERECO
+        if _tem("NUMERO", "NÚMERO"):
+            return atual == CampoApac.ENDERECO
         return True
     if esperado == CampoApac.NUMERO and _tem("NUMERO", "NÚMERO"):
         if _tem("ENDERECO", "ENDEREÇO"):

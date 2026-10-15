@@ -163,6 +163,38 @@ def test_identificar_campo_cep_logradouro():
     assert identificar_campo_linha(linha, cursor_x=20) == CampoApac.LOGRADOURO
 
 
+def test_campo_compativel_cep_logradouro_multirotulo():
+    """Na linha CEP+LOGRADOURO, compatibilidade exige o campo do cursor (cx)."""
+    linha = (
+        "║ CEP        : 65058864                      LOGRADOURO :   "
+    )
+    # Ainda no CEP
+    assert campo_compativel(CampoApac.CEP, CampoApac.CEP, linha=linha)
+    # Ja no LOGRADOURO: NAO e mais CEP (evita Tab extra falso apos aceite)
+    assert (
+        campo_compativel(CampoApac.LOGRADOURO, CampoApac.CEP, linha=linha)
+        is False
+    )
+    assert campo_compativel(
+        CampoApac.LOGRADOURO, CampoApac.LOGRADOURO, linha=linha
+    )
+    # Ainda no CEP: NAO satisfaz gate de LOGRADOURO
+    assert (
+        campo_compativel(CampoApac.CEP, CampoApac.LOGRADOURO, linha=linha)
+        is False
+    )
+
+
+def test_campo_compativel_endereco_numero_multirotulo():
+    linha = "║ ENDERECO   : ANDERSON LAGO                      NUMERO:                      ║"
+    assert campo_compativel(CampoApac.ENDERECO, CampoApac.ENDERECO, linha=linha)
+    assert (
+        campo_compativel(CampoApac.NUMERO, CampoApac.ENDERECO, linha=linha)
+        is False
+    )
+    assert campo_compativel(CampoApac.NUMERO, CampoApac.NUMERO, linha=linha)
+
+
 def test_identificar_campo_nascimento_sexo_etnia():
     linha = "15/12/1975 SEXO: ETNIA :"
     assert identificar_campo_linha(linha) == CampoApac.NASCIMENTO
