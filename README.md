@@ -88,6 +88,11 @@ Não coloque senhas no JSON. O login no BIODATA é manual, em perfil de navegado
 ## 3. Comandos
 
 ```powershell
+# Interface desktop SIS DG (tela inicial → config da clínica + lote)
+.\.venv\Scripts\python.exe -m apac_bot ui --config config.json
+# ou:
+.\.venv\Scripts\python.exe -m apac_bot.ui --config config.json
+
 # Validar configuração + planilha
 .\.venv\Scripts\python.exe -m apac_bot validate --config config.json
 
@@ -252,8 +257,11 @@ Capturas de tela só se `diagnostico.capturar_tela=true` (desligado por padrão;
 
 ```
 src/apac_bot/          # CLI e módulos
+  ui/                  # Interface desktop (CustomTkinter)
   connectors/          # mock + biodata
 data/planilha_exemplo.xlsx
 config.example.json
 tests/
 ```
+
+A UI grava só os campos dinâmicos / planilha / `paciente_inicio` no `config.json` (merge seguro: não apaga `biodata`, timeouts etc.). Credenciais continuam em `secrets.local.json`.

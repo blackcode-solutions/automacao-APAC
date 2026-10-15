@@ -91,6 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_config_arg(p_dump)
 
+    p_ui = sub.add_parser(
+        "ui",
+        help="Abre a interface desktop (CustomTkinter) para config e lote",
+    )
+    _add_config_arg(p_ui)
+
     return parser
 
 
@@ -103,6 +109,12 @@ def main(argv: list[str] | None = None) -> int:
         out = Path(args.out)
         create_example_workbook(out)
         log.info("Planilha fictícia criada: %s", out)
+        return 0
+
+    if args.command == "ui":
+        from apac_bot.ui.app import run_ui
+
+        run_ui(args.config)
         return 0
 
     try:
