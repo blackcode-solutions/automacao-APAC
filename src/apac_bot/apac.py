@@ -154,12 +154,19 @@ def _nome_profissional_f1(nome: str) -> str:
     """Nome para busca A-Z no menu F1 (maiusculo, sem acento)."""
     t = unicodedata.normalize("NFKD", (nome or "").strip())
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    # Magnético: zero com barra (Ø) e digito 0 — digitar como '0'
+    t = t.replace("\u00d8", "0").replace("\u00f8", "0")
     return t.upper()
 
 
 def _norm_nome_profissional(nome: str) -> str:
-    """Normaliza nome de profissional para comparacao (maiusculo, sem acento, espacos)."""
-    return " ".join(_nome_profissional_f1(nome).split())
+    """
+    Normaliza nome de profissional para comparacao.
+    Maiusculo, sem acento; O e Ø equivalem a 0 (ex.: ORCELIO vs 0RCELIO no Magnético).
+    """
+    t = _nome_profissional_f1(nome)
+    t = t.replace("O", "0")
+    return " ".join(t.split())
 
 
 def _nome_profissional_compativel(buscado: str, lido: str) -> bool:
@@ -177,31 +184,50 @@ def _nome_profissional_compativel(buscado: str, lido: str) -> bool:
     return a in b or b in a
 
 
+# Padroes da clinica exemplo (dados_fixos; dinamicos por clinica / UI futura).
+# Selecao no Magnético e por CNS (nome so para confirmacao/label).
+MEDICO_SOLICITANTE_CNS_PADRAO = "705609469670213"
+MEDICO_SOLICITANTE_NOME_PADRAO = "0RCELIO REZENDE"
+AUTORIZADOR_CNS_PADRAO = "708107527671032"
+AUTORIZADOR_NOME_PADRAO = "MARQUES HENRIQUE MARTINS FEITO"
+# Alias legado (testes / logs)
+MEDICO_SOLICITANTE_PADRAO = MEDICO_SOLICITANTE_NOME_PADRAO
+
+
+def _cns_so_digitos(valor: str) -> str:
+    return "".join(ch for ch in str(valor or "") if ch.isdigit())
+
+
 def buscar_paciente_biodata(connector, lanc: Lancamento) -> str:
     """
     Resolve paciente no connector ja aberto; preenche lanc.paciente.
-    Retorna CPF so com digitos. Ambiguidade / nao encontrado -> ApacBlockedError.
+    Retorna CPF so com digitos.
+    Ambiguidade / nao encontrado / dados obrigatorios faltando -> DadosIncompletosError
+    (lote open-apac pula o paciente; nao aborta por cadastro incompleto).
     Nao fecha o connector (sessao permanece para nascimento/sexo).
     """
     # Import tardio: pipeline importa ApacAutomator (evita import circular)
-    from apac_bot.pipeline import resolver_paciente
+    from apac_bot.pipeline import resolver_paciente, validar_dados_obrigatorios_apac
 
     paciente, motivo = resolver_paciente(connector, lanc)
     if motivo or paciente is None:
-        raise ApacBlockedError(
-            f"BIODATA: nao foi possivel obter CPF de '{lanc.paciente_nome}': "
+        msg = (
+            f"BIODATA: nao foi possivel obter dados de '{lanc.paciente_nome}': "
             f"{motivo or 'paciente vazio'}"
         )
+        raise DadosIncompletosError(msg, motivo=motivo or "paciente vazio")
     lanc.paciente = paciente
+    faltando = validar_dados_obrigatorios_apac(paciente, lanc.paciente_nome)
+    if faltando:
+        msg = (
+            f"BIODATA: dados obrigatorios incompletos para '{lanc.paciente_nome}' "
+            f"({faltando})."
+        )
+        raise DadosIncompletosError(msg, motivo=faltando)
     cpf_raw = (paciente.cpf or "").strip()
     cpf = "".join(ch for ch in cpf_raw if ch.isdigit())
-    if len(cpf) != 11:
-        raise ApacBlockedError(
-            f"BIODATA: CPF invalido/ausente para '{lanc.paciente_nome}' "
-            f"(digitos={len(cpf)})."
-        )
     log.info(
-        "BIODATA: CPF obtido para %s (id=%s)",
+        "BIODATA: dados ok / CPF obtido para %s (id=%s)",
         lanc.paciente_nome,
         paciente.id_paciente or "—",
     )
@@ -807,6 +833,17 @@ def hwnds_janela_apac(titulo_needle: str) -> list[int]:
 
 class ApacBlockedError(Exception):
     """Execução live bloqueada por mapeamento incompleto ou política de segurança."""
+
+
+class DadosIncompletosError(ApacBlockedError):
+    """
+    Dados obrigatórios ausentes/inválidos no BIODATA (ou paciente não resolvido).
+    No lote open-apac: marcar AGUARDANDO_REVISAO e seguir para o próximo.
+    """
+
+    def __init__(self, message: str, motivo: Optional[str] = None):
+        super().__init__(message)
+        self.motivo = motivo or message
 
 
 class ApacInterruptedError(Exception):
@@ -3420,26 +3457,29 @@ class ApacAutomator:
             "(foco CARATER ATEND.)."
         )
 
-    def _selecionar_profissional_f1(self, nome: str, *, passo: str) -> None:
+    def _selecionar_profissional_por_cns(self, cns: str, *, passo: str) -> None:
         """
-        No campo CNS: F1 abre CONSULTA DE PROFISSIONAL; digita descricao (A-Z);
-        Enter seleciona e fecha o menu.
+        No campo CNS: F1 abre CONSULTA DE PROFISSIONAL; digita o CNS (CODIGO);
+        Enter seleciona e fecha o menu. Nome e fragil no Magnético (Ø/0/O).
         """
-        digitar = _nome_profissional_f1(nome)
-        if not digitar:
-            raise ApacBlockedError(f"{passo}: nome do profissional vazio.")
+        digitar = _cns_so_digitos(cns)
+        if len(digitar) < 15:
+            raise ApacBlockedError(
+                f"{passo}: CNS do profissional invalido/ausente "
+                f"(digitos={len(digitar)}; dados_fixos por clinica)."
+            )
 
         hwnd = self._ativar_janela_apac(clicar_centro=False)
-        log.info("%s: F1 (consulta profissional) → %r", passo, digitar)
+        log.info("%s: F1 (consulta profissional) → CNS %s", passo, digitar)
         self._enviar_f1(hwnd)
         self._pausa("pos_f1")
 
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         self._digitar_texto(digitar, hwnd)
-        # Filtro A-Z precisa assentar antes do Enter (evita pegar 1a linha errada)
+        # Filtro precisa assentar antes do Enter (evita pegar 1a linha errada)
         self._pausa("pos_digitar")
 
-        log.info("%s: Enter (selecionar profissional)", passo)
+        log.info("%s: Enter (selecionar profissional por CNS)", passo)
         self._enviar_enter(hwnd)
         self._pausa("pos_enter_form")
 
@@ -3480,55 +3520,86 @@ class ApacAutomator:
                     return val
         return ""
 
-    def _confirmar_nome_profissional_apos_f1(
-        self, nome_buscado: str, *, passo: str
+    def _confirmar_profissional_apos_f1(
+        self,
+        cns: str,
+        nome: Optional[str] = None,
+        *,
+        passo: str,
     ) -> None:
         """
-        Apos F1 + Enter (pula CPF): confere NOME na tela com o buscado.
-        Se diferente, aborta (nao confirma o campo errado).
+        Apos F1 + Enter (pula CPF): confere CNS na tela; se nome configurado,
+        confere NOME tambem. Aborta se nao bater (nao confirma profissional errado).
         """
         self._pausa("pre_campo")
-        lido = self._ler_nome_profissional_tela()
-        if not _nome_profissional_compativel(nome_buscado, lido):
+        digitos = _cns_so_digitos(cns)
+        texto = self.ler_tela_console() or ""
+        # Magnético mascara CNS (ex.: 70560946967021-3) — comparar so digitos
+        tela_digitos = _cns_so_digitos(texto)
+        if digitos and digitos not in tela_digitos:
             raise ApacBlockedError(
-                f"{passo}: esperava profissional {nome_buscado!r}, "
-                f"veio {lido!r}. Pare e selecione o correto no F1."
+                f"{passo}: esperava CNS {digitos} na tela apos F1, "
+                f"nao encontrado. Pare e selecione o profissional correto."
             )
-        log.info(
-            "%s: NOME confirmado %r (busca %r)",
-            passo,
-            lido[:60],
-            nome_buscado[:60],
-        )
+        log.info("%s: CNS confirmado na tela (%s)", passo, digitos)
+
+        if nome and str(nome).strip():
+            lido = self._ler_nome_profissional_tela()
+            if lido and not _nome_profissional_compativel(nome, lido):
+                raise ApacBlockedError(
+                    f"{passo}: CNS {digitos} ok, mas NOME esperava {nome!r}, "
+                    f"veio {lido!r}. Pare e revise no APAC."
+                )
+            if lido:
+                log.info(
+                    "%s: NOME confirmado %r (label %r)",
+                    passo,
+                    lido[:60],
+                    nome[:60],
+                )
 
     def preencher_solicitacao_autorizacao(self) -> None:
         """
         Tela SOLICITACAO/AUTORIZACAO:
-          CARATER 01 → CNS medico (F1) → NOME Enter → DT.SOLICITACAO
-          → CNS autorizador (F1) → NOME Enter → DT.AUTORIZACAO
+          CARATER 01 → CNS medico (F1 por CNS) → NOME Enter → DT.SOLICITACAO
+          → CNS autorizador (F1 por CNS) → NOME Enter → DT.AUTORIZACAO
           → COD.ORGAO + Enter → LISTA.
+
+        CNS vem de dados_fixos (dinamico por clinica / UI futura).
         """
         if self._solicitacao_ok:
             return
 
         carater = self._dado_fixo("carater_atend", "01") or "01"
-        medico = self._dado_fixo(
-            "medico_solicitante_nome", "ORCELIO REZENDE"
-        ) or "ORCELIO REZENDE"
-        autorizador = self._dado_fixo(
-            "autorizador_nome", "MARQUES HENRIQUE MARTINS FEITO"
-        ) or "MARQUES HENRIQUE MARTINS FEITO"
+        medico_cns = (
+            self._dado_fixo(
+                "medico_solicitante_cns", MEDICO_SOLICITANTE_CNS_PADRAO
+            )
+            or MEDICO_SOLICITANTE_CNS_PADRAO
+        )
+        medico_nome = self._dado_fixo(
+            "medico_solicitante_nome", MEDICO_SOLICITANTE_NOME_PADRAO
+        ) or MEDICO_SOLICITANTE_NOME_PADRAO
+        autorizador_cns = (
+            self._dado_fixo("autorizador_cns", AUTORIZADOR_CNS_PADRAO)
+            or AUTORIZADOR_CNS_PADRAO
+        )
+        autorizador_nome = self._dado_fixo(
+            "autorizador_nome", AUTORIZADOR_NOME_PADRAO
+        ) or AUTORIZADOR_NOME_PADRAO
         orgao = self._dado_fixo("cod_orgao_emiss", "M211130001")
         inicio, _fim = datas_validade_mes_anterior()
         inicio_legivel = f"{inicio[:2]}/{inicio[2:4]}/{inicio[4:]}"
 
         if self.dry_run:
             log.info(
-                "[dry-run] SOLICITACAO — carater=%s medico=%r autorizador=%r "
-                "dt=%s orgao=%s → LISTA",
+                "[dry-run] SOLICITACAO — carater=%s medico_cns=%s (%r) "
+                "autorizador_cns=%s (%r) dt=%s orgao=%s → LISTA",
                 carater,
-                medico,
-                autorizador,
+                _cns_so_digitos(medico_cns),
+                medico_nome,
+                _cns_so_digitos(autorizador_cns),
+                autorizador_nome,
                 inicio_legivel,
                 orgao,
             )
@@ -3544,6 +3615,16 @@ class ApacAutomator:
                     "operador recusou preencher SOLICITACAO/AUTORIZACAO"
                 )
 
+        if not _cns_so_digitos(medico_cns):
+            raise ApacBlockedError(
+                "dados_fixos.medico_solicitante_cns e obrigatorio "
+                "(dinamico por clinica; UI futura)."
+            )
+        if not _cns_so_digitos(autorizador_cns):
+            raise ApacBlockedError(
+                "dados_fixos.autorizador_cns e obrigatorio "
+                "(dinamico por clinica; UI futura)."
+            )
         if not orgao:
             raise ApacBlockedError(
                 "dados_fixos.cod_orgao_emiss e obrigatorio "
@@ -3573,14 +3654,16 @@ class ApacAutomator:
         self._enviar_enter(hwnd)
         self._pausa("pos_enter_form")
 
-        # 2) CNS medico responsavel
-        self._selecionar_profissional_f1(medico, passo="CNS medico")
+        # 2) CNS medico responsavel (busca F1 pelo CNS, nao pelo nome)
+        self._selecionar_profissional_por_cns(medico_cns, passo="CNS medico")
         log.info("CNS medico: Enter (pula CPF → NOME)")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         self._enviar_enter(hwnd)
         self._pausa("pos_enter_form")
 
-        self._confirmar_nome_profissional_apos_f1(medico, passo="CNS medico")
+        self._confirmar_profissional_apos_f1(
+            medico_cns, medico_nome, passo="CNS medico"
+        )
         log.info("NOME medico: Enter (aceitar preenchido)")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         self._enviar_enter(hwnd)
@@ -3592,15 +3675,17 @@ class ApacAutomator:
         self._digitar_texto(inicio, hwnd)
         self._pausa("pos_digitar_curto")
 
-        # 4) CNS autorizador
-        self._selecionar_profissional_f1(autorizador, passo="CNS autorizador")
+        # 4) CNS autorizador (busca F1 pelo CNS)
+        self._selecionar_profissional_por_cns(
+            autorizador_cns, passo="CNS autorizador"
+        )
         log.info("CNS autorizador: Enter (pula CPF → NOME)")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         self._enviar_enter(hwnd)
         self._pausa("pos_enter_form")
 
-        self._confirmar_nome_profissional_apos_f1(
-            autorizador, passo="CNS autorizador"
+        self._confirmar_profissional_apos_f1(
+            autorizador_cns, autorizador_nome, passo="CNS autorizador"
         )
         log.info("NOME autorizador: Enter (aceitar preenchido)")
         hwnd = self._ativar_janela_apac(clicar_centro=False)
@@ -3960,7 +4045,10 @@ def _processar_paciente_open_apac(
     indice: int,
     total: int,
 ) -> None:
-    """Fluxo completo de um paciente: Insert → identificacao → procedimentos → LISTA."""
+    """
+    Fluxo completo: pré-check BIODATA → Insert → identificacao → procedimentos → LISTA.
+    Dados incompletos levantam DadosIncompletosError antes de qualquer tecla no APAC.
+    """
     log.info(
         "Lote %s/%s: %s | NUMERO APAC: %s (planilha linha %s)",
         indice,
@@ -3969,8 +4057,16 @@ def _processar_paciente_open_apac(
         lanc.numeracao_apac,
         lanc.linha_planilha,
     )
-    automator.exigir_tela(TelaApac.LISTA, passo=f"antes Insert ({lanc.paciente_nome})")
     automator._reiniciar_flags_paciente()
+
+    # Pré-check: BIODATA + obrigatorios (CPF/mae/nasc/sexo) antes do Insert
+    log.info(
+        "Consultando BIODATA para %s (sessao compartilhada do lote)...",
+        lanc.paciente_nome,
+    )
+    cpf = buscar_paciente_biodata(connector, lanc)
+
+    automator.exigir_tela(TelaApac.LISTA, passo=f"antes Insert ({lanc.paciente_nome})")
     automator.iniciar_inclusao_insert()
 
     # Bloco 1 — cabecalho
@@ -3981,12 +4077,6 @@ def _processar_paciente_open_apac(
     automator.preencher_validade_mes_anterior()
     automator.preencher_tipo_e_nacionalidade()
     automator.preencher_prontuario_e_sem_cpf()
-
-    log.info(
-        "Consultando BIODATA para %s (sessao compartilhada do lote)...",
-        lanc.paciente_nome,
-    )
-    cpf = buscar_paciente_biodata(connector, lanc)
 
     # Bloco 2 — CPF / nomes
     automator.exigir_tela(TelaApac.IDENTIFICACAO, passo="bloco cpf/nomes")
@@ -4030,15 +4120,19 @@ def _processar_paciente_open_apac(
     automator.preencher_solicitacao_autorizacao()
     log.info(
         "APAC: paciente %s concluido ate LISTA "
-        "(cod=%s carater=%s medico=%r autorizador=%r orgao=%s).",
+        "(cod=%s carater=%s medico_cns=%s (%r) autorizador_cns=%s (%r) orgao=%s).",
         lanc.paciente_nome,
         automator._resolver_codigo_procedimento(lanc),
         automator._dado_fixo("carater_atend", "01") or "01",
         automator._dado_fixo(
-            "medico_solicitante_nome", "ORCELIO REZENDE"
+            "medico_solicitante_cns", MEDICO_SOLICITANTE_CNS_PADRAO
         ),
         automator._dado_fixo(
-            "autorizador_nome", "MARQUES HENRIQUE MARTINS FEITO"
+            "medico_solicitante_nome", MEDICO_SOLICITANTE_NOME_PADRAO
+        ),
+        automator._dado_fixo("autorizador_cns", AUTORIZADOR_CNS_PADRAO),
+        automator._dado_fixo(
+            "autorizador_nome", AUTORIZADOR_NOME_PADRAO
         ),
         automator._dado_fixo("cod_orgao_emiss", "M211130001"),
     )
@@ -4119,6 +4213,7 @@ def open_apac_session(cfg: AppConfig) -> None:
             raise ApacBlockedError(str(exc)) from exc
         automator._biodata_connector = connector
 
+        revisao = 0
         for i, lanc in enumerate(fila, start=1):
             store.upsert(lanc, EstadoLancamento.EM_PROCESSAMENTO)
             try:
@@ -4135,6 +4230,21 @@ def open_apac_session(cfg: AppConfig) -> None:
                     motivo="open-apac: voltou a LISTA",
                 )
                 concluidos += 1
+            except DadosIncompletosError as exc:
+                store.upsert(
+                    lanc,
+                    EstadoLancamento.AGUARDANDO_REVISAO,
+                    motivo=exc.motivo,
+                )
+                revisao += 1
+                log.warning(
+                    "Lote: pulando %s/%s (%s) — %s",
+                    i,
+                    total,
+                    lanc.paciente_nome,
+                    exc.motivo,
+                )
+                continue
             except ApacInterruptedError as exc:
                 store.upsert(
                     lanc,
@@ -4189,9 +4299,10 @@ def open_apac_session(cfg: AppConfig) -> None:
                 raise
 
         log.info(
-            "Lote open-apac concluido: %s paciente(s) neste run "
+            "Lote open-apac concluido: %s ok, %s revisao "
             "(%s pulado(s) na retomada).",
             concluidos,
+            revisao,
             len(pulados),
         )
     finally:

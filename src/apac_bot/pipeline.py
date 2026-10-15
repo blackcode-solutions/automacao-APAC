@@ -9,15 +9,41 @@ from apac_bot.connectors import build_connector
 from apac_bot.connectors.biodata import BiodataMappingError
 from apac_bot.logging_safe import setup_logging, short_id
 from apac_bot.models import EstadoLancamento, Lancamento, PacienteDados
-from apac_bot.normalize import tem_cpf_valido
+from apac_bot.normalize import nascimento_ddmmaaaa, sexo_para_apac, tem_cpf_valido
 from apac_bot.progress import ProgressStore
-from apac_bot.sheet import SheetError, load_lancamentos
+from apac_bot.sheet import SheetError, load_lancamentos, nome_mae_valido
 
 log = setup_logging()
 
 
 class PipelineError(Exception):
     pass
+
+
+def validar_dados_obrigatorios_apac(
+    paciente: Optional[PacienteDados],
+    paciente_nome: str,
+) -> Optional[str]:
+    """
+    Pré-check antes do Insert no Magnético.
+    Retorna None se CPF, nome da mãe, nascimento e sexo estiverem ok;
+    senão string com os campos faltando (ex.: "faltam: cpf, nome_mae").
+    """
+    if paciente is None:
+        return "faltam: cpf, nome_mae, nascimento, sexo"
+
+    faltam: list[str] = []
+    if not tem_cpf_valido(paciente.cpf):
+        faltam.append("cpf")
+    if not nome_mae_valido(paciente.nome_mae, paciente_nome):
+        faltam.append("nome_mae")
+    if not nascimento_ddmmaaaa(paciente.nascimento):
+        faltam.append("nascimento")
+    if not sexo_para_apac(paciente.sexo):
+        faltam.append("sexo")
+    if not faltam:
+        return None
+    return "faltam: " + ", ".join(faltam)
 
 
 def _store(cfg: AppConfig) -> ProgressStore:

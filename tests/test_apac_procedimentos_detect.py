@@ -92,5 +92,6 @@ def test_dt_solicitacao_primeiro_dia_mes_anterior():
 
     inicio, _fim = datas_validade_mes_anterior(date(2026, 10, 14))
     assert inicio == "01092026"
-    assert _nome_profissional_f1("ORCELIO REZENDE") == "ORCELIO REZENDE"
+    assert _nome_profissional_f1("0RCELIO REZENDE") == "0RCELIO REZENDE"
+    assert _nome_profissional_f1("ØRCELIO REZENDE") == "0RCELIO REZENDE"
     assert _nome_profissional_f1("José") == "JOSE"

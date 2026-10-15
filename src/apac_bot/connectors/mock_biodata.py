@@ -13,6 +13,7 @@ _PACIENTES: list[PacienteDados] = [
         nome="MARIA SILVA FICTICIA",
         nome_mae="ANA SILVA FICTICIA",
         nascimento="01/01/1980",
+        sexo="F",
         endereco="Rua Exemplo, 100 - Cidade Ficticia",
     ),
     PacienteDados(
@@ -22,6 +23,7 @@ _PACIENTES: list[PacienteDados] = [
         nome="JOAO SOUZA FICTICIO",
         nome_mae="MARIA SOUZA FICTICIA",
         nascimento="15/05/1975",
+        sexo="M",
         endereco="Av. Teste, 200 - Cidade Ficticia",
     ),
     PacienteDados(
@@ -31,6 +33,7 @@ _PACIENTES: list[PacienteDados] = [
         nome="ANA COSTA FICTICIA",
         nome_mae="JOANA COSTA FICTICIA",
         nascimento="20/08/1990",
+        sexo="F",
         endereco="Travessa Demo, 30 - Cidade Ficticia",
     ),
     # Dois registros com o mesmo nome para forçar ambiguidade
@@ -41,6 +44,7 @@ _PACIENTES: list[PacienteDados] = [
         nome="PACIENTE AMBIGUO",
         nome_mae="MAE A FICTICIA",
         nascimento="01/01/1985",
+        sexo="F",
         endereco="Rua A, 1 - Cidade Ficticia",
     ),
     PacienteDados(
@@ -50,6 +54,7 @@ _PACIENTES: list[PacienteDados] = [
         nome="PACIENTE AMBIGUO",
         nome_mae="MAE B FICTICIA",
         nascimento="02/02/1986",
+        sexo="M",
         endereco="Rua B, 2 - Cidade Ficticia",
     ),
 ]

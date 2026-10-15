@@ -95,7 +95,9 @@
     "cns_executante": "701003891196892",
     "motivo_saida": "12",
     "carater_atend": "01",
-    "medico_solicitante_nome": "ORCELIO REZENDE",
+    "medico_solicitante_cns": "705609469670213",
+    "medico_solicitante_nome": "0RCELIO REZENDE",
+    "autorizador_cns": "708107527671032",
     "autorizador_nome": "MARQUES HENRIQUE MARTINS FEITO",
     "cod_orgao_emiss": "M211130001"
   },
