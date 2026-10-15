@@ -12,9 +12,11 @@ from apac_bot.ui.config_io import (
     ConfigIoError,
     UiFormData,
     aplicar_defaults_clinica,
+    codigo_orgao_emiss,
     form_from_raw,
     merge_form_into_raw,
     save_form,
+    tipo_orgao_emiss,
     validate_form,
 )
 
@@ -84,8 +86,22 @@ def _form_ok(**overrides) -> UiFormData:
 
 def test_ui_secoes_tela_flatten():
     flatten = tuple(key for _titulo, keys in UI_SECOES_TELA for key in keys)
-    assert flatten == DADOS_FIXOS_UI_KEYS
-    assert len(flatten) == len(set(flatten))
+    assert DADOS_FIXOS_UI_KEYS == flatten + (
+        "autorizador_cns",
+        "autorizador_nome",
+        "cod_orgao_emiss",
+    )
+    assert len(DADOS_FIXOS_UI_KEYS) == len(set(DADOS_FIXOS_UI_KEYS))
+    assert "cod_orgao_emiss" not in flatten
+    assert "autorizador_cns" not in flatten
+
+
+def test_orgao_emiss_municipal_estadual():
+    assert codigo_orgao_emiss("Municipal") == "M211130001"
+    assert codigo_orgao_emiss("Estadual") == "E210000001"
+    assert tipo_orgao_emiss("M211130001") == "Municipal"
+    assert tipo_orgao_emiss("E210000001") == "Estadual"
+    assert tipo_orgao_emiss("desconhecido") == "Municipal"
 
 
 def test_cnes_por_clinica_oftalmocentro91():

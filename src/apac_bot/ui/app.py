@@ -18,17 +18,20 @@ from apac_bot.ui.config_io import (
     CNES_UI_KEYS,
     DADOS_FIXOS_LABELS,
     DADOS_FIXOS_UI_KEYS,
+    ORGAO_EMISS_TIPOS,
     SISTEMAS_UI,
     UI_SECOES_TELA,
     ConfigIoError,
     UiFormData,
     aplicar_defaults_clinica,
+    codigo_orgao_emiss,
     default_config_path,
     load_form,
     normalizar_sistema_origem,
     save_form,
     secrets_missing,
     sistema_ui_label,
+    tipo_orgao_emiss,
     validate_form,
 )
 
@@ -413,11 +416,13 @@ class ApacBotApp(ctk.CTk):
     def _show_main(self) -> None:
         self._splash_mode = False
         self._clear_root()
+        # Libera o maxsize da splash (senão a janela continua travada).
+        screen_w = max(self.winfo_screenwidth(), 1280)
+        screen_h = max(self.winfo_screenheight(), 900)
+        self.maxsize(screen_w, screen_h)
+        self.minsize(720, 520)
+        self.resizable(True, True)
         self.geometry("980x780")
-        self.minsize(980, 780)
-        self.maxsize(980, 780)
-        self.resizable(False, False)
-        # Volta ao tema padrão do CustomTkinter (dark)
         self.configure(fg_color=("gray95", "gray95"))
         self.title(f"{APP_NAME} — Automação APAC")
         self._build()
@@ -428,31 +433,36 @@ class ApacBotApp(ctk.CTk):
 
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        top = ctk.CTkFrame(self)
-        top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
-        top.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            top,
-            text=f"{APP_NAME} — configuração do lote",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=0, column=0, padx=8, pady=8, sticky="w")
-        ctk.CTkButton(
-            top, text="Recarregar", width=100, command=self._load_into_form
-        ).grid(row=0, column=1, padx=(4, 8), pady=8)
-
+        # Um único scroll: formulário + ações + log (não só o form).
         body = ctk.CTkScrollableFrame(self)
-        body.grid(row=1, column=0, sticky="nsew", padx=12, pady=6)
+        body.grid(row=0, column=0, sticky="nsew", padx=8, pady=4)
         body.grid_columnconfigure(0, weight=1)
         body.grid_columnconfigure(1, weight=1)
         body.grid_columnconfigure(2, weight=0)
 
         row = 0
+        header = ctk.CTkFrame(body, fg_color="transparent")
+        header.grid(row=row, column=0, columnspan=3, sticky="ew", padx=0, pady=(0, 2))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header,
+            text=f"{APP_NAME} — configuração do lote",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, padx=4, pady=0, sticky="w")
+        ctk.CTkButton(
+            header,
+            text="Recarregar",
+            width=100,
+            height=28,
+            command=self._load_into_form,
+        ).grid(row=0, column=1, padx=(4, 4), pady=0)
+        row += 1
+
         ctk.CTkLabel(
             body, text="Clínica / planilha", font=ctk.CTkFont(size=15, weight="bold")
-        ).grid(row=row, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 8))
+        ).grid(row=row, column=0, columnspan=3, sticky="w", padx=4, pady=(2, 2))
         row += 1
 
         row = self._add_sistema_clinica_planilha_row(body, row)
@@ -461,10 +471,12 @@ class ApacBotApp(ctk.CTk):
         for titulo, keys in UI_SECOES_TELA:
             ctk.CTkLabel(
                 body, text=titulo, font=ctk.CTkFont(size=15, weight="bold")
-            ).grid(row=row, column=0, columnspan=3, sticky="w", padx=4, pady=(12, 4))
+            ).grid(row=row, column=0, columnspan=3, sticky="w", padx=4, pady=(6, 2))
             row += 1
             n_cols = 5 if titulo == "Procedimentos" else 3
             row = self._add_fields_grid(body, row, keys, cols=n_cols)
+            if titulo == "Solicitação / Autorização":
+                row = self._add_solicitacao_autorizador_orgao_row(body, row)
 
         self._apply_cnes_for_clinica(self.opt_clinica.get())
 
@@ -472,30 +484,31 @@ class ApacBotApp(ctk.CTk):
             body, text="", text_color="#c9a227", wraplength=700, justify="left"
         )
         self.lbl_aviso.grid(
-            row=row, column=0, columnspan=3, sticky="w", padx=4, pady=(12, 4)
+            row=row, column=0, columnspan=3, sticky="w", padx=4, pady=(6, 2)
         )
+        row += 1
 
-        actions = ctk.CTkFrame(self)
-        actions.grid(row=2, column=0, sticky="ew", padx=12, pady=6)
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.grid(row=row, column=0, columnspan=3, sticky="ew", padx=0, pady=(8, 4))
         for i in range(5):
             actions.grid_columnconfigure(i, weight=1)
 
         self.btn_salvar = ctk.CTkButton(actions, text="Salvar", command=self._on_salvar)
-        self.btn_salvar.grid(row=0, column=0, padx=4, pady=8, sticky="ew")
+        self.btn_salvar.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
         self.btn_validate = ctk.CTkButton(
             actions, text="Validar", command=lambda: self._run_cli("validate")
         )
-        self.btn_validate.grid(row=0, column=1, padx=4, pady=8, sticky="ew")
+        self.btn_validate.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
         self.btn_open_apac = ctk.CTkButton(
             actions,
             text="Iniciar lote (open-apac)",
             command=lambda: self._run_cli("open-apac"),
         )
-        self.btn_open_apac.grid(row=0, column=2, padx=4, pady=8, sticky="ew")
+        self.btn_open_apac.grid(row=0, column=2, padx=4, pady=4, sticky="ew")
         self.btn_status = ctk.CTkButton(
             actions, text="Status", command=lambda: self._run_cli("status")
         )
-        self.btn_status.grid(row=0, column=3, padx=4, pady=8, sticky="ew")
+        self.btn_status.grid(row=0, column=3, padx=4, pady=4, sticky="ew")
         self.btn_cancel = ctk.CTkButton(
             actions,
             text="Cancelar",
@@ -504,24 +517,26 @@ class ApacBotApp(ctk.CTk):
             command=self._cancel_job,
             state="disabled",
         )
-        self.btn_cancel.grid(row=0, column=4, padx=4, pady=8, sticky="ew")
+        self.btn_cancel.grid(row=0, column=4, padx=4, pady=4, sticky="ew")
+        row += 1
 
-        log_frame = ctk.CTkFrame(self)
-        log_frame.grid(row=3, column=0, sticky="nsew", padx=12, pady=(6, 12))
+        log_frame = ctk.CTkFrame(body)
+        log_frame.grid(
+            row=row, column=0, columnspan=3, sticky="ew", padx=0, pady=(4, 8)
+        )
         log_frame.grid_columnconfigure(0, weight=1)
-        log_frame.grid_rowconfigure(1, weight=1)
         ctk.CTkLabel(log_frame, text="Log", font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=0, sticky="w", padx=8, pady=(8, 4)
         )
         self.log_box = ctk.CTkTextbox(
             log_frame, height=180, font=ctk.CTkFont(family="Consolas", size=12)
         )
-        self.log_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.log_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
         self.log_box.configure(state="disabled")
 
     def _add_fields_grid(
         self,
-        parent: ctk.CTkScrollableFrame,
+        parent: ctk.CTkFrame,
         row: int,
         keys: tuple[str, ...],
         cols: int = 3,
@@ -534,15 +549,15 @@ class ApacBotApp(ctk.CTk):
         for start in range(0, len(keys), cols):
             chunk = keys[start : start + cols]
             wrap = ctk.CTkFrame(parent, fg_color="transparent")
-            wrap.grid(row=row, column=0, columnspan=3, sticky="ew", padx=0, pady=4)
+            wrap.grid(row=row, column=0, columnspan=3, sticky="ew", padx=0, pady=1)
             for i in range(cols):
                 wrap.grid_columnconfigure(i, weight=1)
             for col, key in enumerate(chunk):
                 cell = ctk.CTkFrame(wrap, fg_color="transparent")
-                cell.grid(row=0, column=col, sticky="ew", padx=4, pady=0)
+                cell.grid(row=0, column=col, sticky="ew", padx=2, pady=0)
                 cell.grid_columnconfigure(0, weight=1)
                 ctk.CTkLabel(cell, text=labels.get(key, key)).grid(
-                    row=0, column=0, sticky="w", padx=0, pady=(0, 2)
+                    row=0, column=0, sticky="w", padx=0, pady=(0, 1)
                 )
                 if key == "tipo_apac":
                     self.opt_tipo_apac = ctk.CTkOptionMenu(
@@ -559,12 +574,80 @@ class ApacBotApp(ctk.CTk):
             row += 1
         return row
 
+    def _add_solicitacao_autorizador_orgao_row(
+        self, parent: ctk.CTkFrame, row: int
+    ) -> int:
+        """CNS autorizador | Nome | Órgão emissor | Código emissor (readonly)."""
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.grid(row=row, column=0, columnspan=3, sticky="ew", padx=0, pady=1)
+        wrap.grid_columnconfigure(0, weight=0)
+        wrap.grid_columnconfigure(1, weight=1)
+        wrap.grid_columnconfigure(2, weight=0)
+        wrap.grid_columnconfigure(3, weight=0)
+
+        col_cns = ctk.CTkFrame(wrap, fg_color="transparent")
+        col_cns.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
+        ctk.CTkLabel(col_cns, text=DADOS_FIXOS_LABELS["autorizador_cns"]).grid(
+            row=0, column=0, sticky="w", padx=0, pady=(0, 1)
+        )
+        entry_cns = ctk.CTkEntry(col_cns, width=140)
+        entry_cns.grid(row=1, column=0, sticky="w", padx=0, pady=0)
+        self._entries["autorizador_cns"] = entry_cns
+
+        col_nome = ctk.CTkFrame(wrap, fg_color="transparent")
+        col_nome.grid(row=0, column=1, sticky="ew", padx=2, pady=0)
+        col_nome.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(col_nome, text=DADOS_FIXOS_LABELS["autorizador_nome"]).grid(
+            row=0, column=0, sticky="w", padx=0, pady=(0, 1)
+        )
+        entry_nome = ctk.CTkEntry(col_nome)
+        entry_nome.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+        self._entries["autorizador_nome"] = entry_nome
+
+        col_tipo = ctk.CTkFrame(wrap, fg_color="transparent")
+        col_tipo.grid(row=0, column=2, sticky="nw", padx=2, pady=0)
+        ctk.CTkLabel(col_tipo, text=DADOS_FIXOS_LABELS["orgao_emiss_tipo"]).grid(
+            row=0, column=0, sticky="w", padx=0, pady=(0, 1)
+        )
+        self.opt_orgao_emiss = ctk.CTkOptionMenu(
+            col_tipo,
+            values=list(ORGAO_EMISS_TIPOS),
+            width=120,
+            command=self._on_orgao_emiss_changed,
+        )
+        self.opt_orgao_emiss.grid(row=1, column=0, sticky="w", padx=0, pady=0)
+        self.opt_orgao_emiss.set("Municipal")
+
+        col_cod = ctk.CTkFrame(wrap, fg_color="transparent")
+        col_cod.grid(row=0, column=3, sticky="nw", padx=2, pady=0)
+        ctk.CTkLabel(col_cod, text=DADOS_FIXOS_LABELS["cod_orgao_emiss"]).grid(
+            row=0, column=0, sticky="w", padx=0, pady=(0, 1)
+        )
+        entry_cod = ctk.CTkEntry(col_cod, width=120)
+        entry_cod.grid(row=1, column=0, sticky="w", padx=0, pady=0)
+        self._entries["cod_orgao_emiss"] = entry_cod
+        self._sync_orgao_emiss_codigo("Municipal")
+        return row + 1
+
+    def _sync_orgao_emiss_codigo(self, tipo: str) -> None:
+        entry = self._entries.get("cod_orgao_emiss")
+        if entry is None:
+            return
+        codigo = codigo_orgao_emiss(tipo)
+        entry.configure(state="normal")
+        entry.delete(0, "end")
+        entry.insert(0, codigo)
+        entry.configure(state="disabled")
+
+    def _on_orgao_emiss_changed(self, choice: str) -> None:
+        self._sync_orgao_emiss_codigo(choice)
+
     def _add_sistema_clinica_planilha_row(
-        self, parent: ctk.CTkScrollableFrame, row: int
+        self, parent: ctk.CTkFrame, row: int
     ) -> int:
         """Sistema | Clínica | Planilha — label em cima; selects estreitos."""
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        wrap.grid(row=row, column=0, columnspan=3, sticky="ew", padx=0, pady=4)
+        wrap.grid(row=row, column=0, columnspan=3, sticky="ew", padx=0, pady=1)
         wrap.grid_columnconfigure(0, weight=0)
         wrap.grid_columnconfigure(1, weight=0)
         wrap.grid_columnconfigure(2, weight=1)
@@ -672,6 +755,7 @@ class ApacBotApp(ctk.CTk):
             if key in self._entries
         }
         dados["tipo_apac"] = self.opt_tipo_apac.get().strip()
+        dados["cod_orgao_emiss"] = codigo_orgao_emiss(self.opt_orgao_emiss.get())
         sistema = normalizar_sistema_origem(self.opt_sistema.get())
         clinica = self.opt_clinica.get().strip()
         if clinica == "—":
@@ -707,7 +791,7 @@ class ApacBotApp(ctk.CTk):
             **form.dados_fixos_completos(),
         }
         for key, valor in mapping.items():
-            if key == "tipo_apac":
+            if key in {"tipo_apac", "cod_orgao_emiss"}:
                 continue
             entry = self._entries.get(key)
             if entry is None:
@@ -717,6 +801,12 @@ class ApacBotApp(ctk.CTk):
 
         tipo = str(form.dados_fixos.get("tipo_apac") or "").strip()
         self.opt_tipo_apac.set(tipo if tipo in {"1", "3"} else "3")
+
+        orgao_tipo = tipo_orgao_emiss(
+            str(form.dados_fixos.get("cod_orgao_emiss") or "")
+        )
+        self.opt_orgao_emiss.set(orgao_tipo)
+        self._sync_orgao_emiss_codigo(orgao_tipo)
 
         self._apply_cnes_for_clinica(self.opt_clinica.get())
 

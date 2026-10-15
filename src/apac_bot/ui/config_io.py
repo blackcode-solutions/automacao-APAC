@@ -30,17 +30,14 @@ UI_SECOES_TELA: tuple[tuple[str, tuple[str, ...]], ...] = (
             "carater_atend",
             "medico_solicitante_cns",
             "medico_solicitante_nome",
-            "autorizador_cns",
-            "autorizador_nome",
-            "cod_orgao_emiss",
         ),
     ),
 )
 
-# Flatten das seções (ordem estável para collect/validate/merge).
+# Flatten das seções + campos com controles especiais fora da grade.
 DADOS_FIXOS_UI_KEYS: tuple[str, ...] = tuple(
     key for _titulo, keys in UI_SECOES_TELA for key in keys
-)
+) + ("autorizador_cns", "autorizador_nome", "cod_orgao_emiss")
 
 # Labels amigáveis (UI).
 DADOS_FIXOS_LABELS: dict[str, str] = {
@@ -57,8 +54,16 @@ DADOS_FIXOS_LABELS: dict[str, str] = {
     "medico_solicitante_nome": "Nome médico solicitante",
     "autorizador_cns": "CNS autorizador",
     "autorizador_nome": "Nome autorizador",
-    "cod_orgao_emiss": "Código órgão emissor",
+    "cod_orgao_emiss": "Código emissor",
+    "orgao_emiss_tipo": "Órgão emissor",
 }
+
+# Select Municipal/Estadual → código gravado em dados_fixos.
+ORGAO_EMISS_POR_TIPO: dict[str, str] = {
+    "Municipal": "M211130001",
+    "Estadual": "E210000001",
+}
+ORGAO_EMISS_TIPOS: tuple[str, ...] = tuple(ORGAO_EMISS_POR_TIPO.keys())
 
 CNS_KEYS = frozenset(
     {
@@ -96,6 +101,21 @@ def aplicar_defaults_clinica(clinica_id: str) -> dict[str, str]:
     key = str(clinica_id or "").strip()
     bloco = CNES_POR_CLINICA.get(key) or {}
     return {k: str(bloco.get(k) or "").strip() for k in CNES_UI_KEYS if bloco.get(k)}
+
+
+def codigo_orgao_emiss(tipo: str) -> str:
+    """Código APAC a partir do tipo Municipal/Estadual (default Municipal)."""
+    key = str(tipo or "").strip()
+    return ORGAO_EMISS_POR_TIPO.get(key) or ORGAO_EMISS_POR_TIPO["Municipal"]
+
+
+def tipo_orgao_emiss(codigo: str) -> str:
+    """Tipo do select a partir do código gravado (default Municipal)."""
+    valor = str(codigo or "").strip()
+    for tipo, cod in ORGAO_EMISS_POR_TIPO.items():
+        if cod == valor:
+            return tipo
+    return "Municipal"
 
 
 def sistema_ui_label(sistema_origem: str) -> str:
