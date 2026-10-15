@@ -157,6 +157,26 @@ def _nome_profissional_f1(nome: str) -> str:
     return t.upper()
 
 
+def _norm_nome_profissional(nome: str) -> str:
+    """Normaliza nome de profissional para comparacao (maiusculo, sem acento, espacos)."""
+    return " ".join(_nome_profissional_f1(nome).split())
+
+
+def _nome_profissional_compativel(buscado: str, lido: str) -> bool:
+    """
+    True se o nome lido no APAC corresponde ao buscado.
+    Aceita igualdade ou um contendo o outro (truncagem/extensao do Magnético).
+    """
+    a = _norm_nome_profissional(buscado)
+    b = _norm_nome_profissional(lido)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # Contencao de frase completa (nao so um token solto)
+    return a in b or b in a
+
+
 def buscar_paciente_biodata(connector, lanc: Lancamento) -> str:
     """
     Resolve paciente no connector ja aberto; preenche lanc.paciente.
@@ -220,6 +240,8 @@ def refrescar_paciente_biodata(connector, lanc: Lancamento) -> None:
 
 DEFAULT_APAC_EXE = Path(r"C:\APAC\APAC.exe")
 APAC_PROCESS_NAME = "APAC.exe"
+# Fallback quando BIODATA nao tem CEP (8 digitos) — evita Tab-pular e foco preso.
+CEP_PADRAO_APAC = "65020070"
 # APAC Magnético é console: a janela visível costuma ser do Windows Terminal / conhost
 HOST_WINDOW_PROCESS_NAMES = {
     "apac.exe",
@@ -2231,17 +2253,35 @@ class ApacAutomator:
             return t
         return t
 
+    def _cep_para_digitar_apac(self, lanc: Lancamento) -> str:
+        """
+        CEP do BIODATA (8 digitos) ou CEP_PADRAO_APAC se ausente/invalido.
+        """
+        origem = self._valor_biodata_ou_refrescar(lanc, "cep", rotulo="CEP")
+        digitos = "".join(ch for ch in (origem or "") if ch.isdigit())
+        if len(digitos) >= 8:
+            return digitos[:8]
+        log.warning(
+            "CEP ausente/invalido na origem para %s — usando padrao %s",
+            lanc.paciente_nome,
+            CEP_PADRAO_APAC,
+        )
+        return CEP_PADRAO_APAC
+
     def aceitar_cep_se_preenchido(self, lanc: Lancamento) -> None:
         """
-        CEP: Tab se preenchido (8 digitos); se vazio, digita BIODATA; se BIODATA vazio, Tab.
+        CEP: Tab se preenchido (8 digitos); se vazio, digita BIODATA;
+        se BIODATA sem CEP, digita CEP_PADRAO_APAC (nunca Tab-pular vazio).
         """
+        digita = self._cep_para_digitar_apac(lanc)
         self._aceitar_campo_texto_se_preenchido(
             lanc,
             rotulo="CEP",
             flag_attr="_cep_aceito",
             max_chars=80,
             aceitar_enter_se_origem="cep",
-            vazio_aceita_tab=True,
+            vazio_digita=digita,
+            vazio_aceita_tab=False,
         )
         # Linha CEP+LOGRADOURO: se Tab nao tirou o foco do CEP, Tab extra 1x
         if self.dry_run:
@@ -2384,54 +2424,49 @@ class ApacAutomator:
                 or ""
             )
         tipo = tipo_logradouro_do_endereco(endereco)
-        if tipo:
+        if not tipo:
+            # Tab em LOGRADOURO vazio trava o foco — F1 RUA como fallback
+            log.warning(
+                "LOGRADOURO vazio e sem tipo no endereco %r — F1 fallback RUA.",
+                endereco[:60],
+            )
+            tipo = "RUA"
+        else:
             log.info(
                 "LOGRADOURO vazio — F1 com tipo %r (endereco=%r)",
                 tipo,
                 endereco[:60],
             )
-            if self._confirmar_nav():
-                ok = self.confirm_fn(
-                    f"LOGRADOURO F1 '{tipo}' — digite s: "
-                )
-                if not ok:
-                    raise ApacBlockedError(
-                        "operador recusou F1 no LOGRADOURO"
-                    )
-            aguardar_enter_solto()
-            self._selecionar_logradouro_f1(tipo)
-            self.exigir_tela(
-                TelaApac.IDENTIFICACAO, passo="apos F1 LOGRADOURO"
+        if self._confirmar_nav():
+            ok = self.confirm_fn(
+                f"LOGRADOURO F1 '{tipo}' — digite s: "
             )
-            # Recovery: lista F1 ainda aberta → Enter; se ainda no LOGRADOURO → Tab
-            try:
-                buf = (self.ler_tela_console() or "").upper()
-                if "ENTER=SELECIONA" in buf.replace(" ", ""):
-                    log.warning(
-                        "LOGRADOURO: lista F1 ainda aberta — Enter recovery"
-                    )
-                    hwnd = self._ativar_janela_apac(clicar_centro=False)
-                    self._enviar_enter(hwnd)
-                    self._pausa("pos_enter_form")
-                    hwnd = self._ativar_janela_apac(clicar_centro=False)
-                    self._enviar_tab(hwnd)
-                    self._pausa("pos_tab_apos_aceitar")
-            except ConsoleScreenError as exc:
-                log.warning("LOGRADOURO: checagem pos-F1 falhou: %s", exc)
-            self._logradouro_aceito = True
-            log.info("LOGRADOURO: F1 ok (%s) — proximo campo.", tipo)
-            return
-
-        log.warning(
-            "LOGRADOURO vazio e sem tipo no endereco %r — Tab.",
-            endereco[:60],
+            if not ok:
+                raise ApacBlockedError(
+                    "operador recusou F1 no LOGRADOURO"
+                )
+        aguardar_enter_solto()
+        self._selecionar_logradouro_f1(tipo)
+        self.exigir_tela(
+            TelaApac.IDENTIFICACAO, passo="apos F1 LOGRADOURO"
         )
-        hwnd = self._ativar_janela_apac(clicar_centro=False)
-        self._enviar_tab(hwnd)
-        self._pausa("pos_tab_apos_aceitar")
-        self.exigir_tela(TelaApac.IDENTIFICACAO, passo="apos Tab em LOGRADOURO")
+        # Recovery: lista F1 ainda aberta → Enter; se ainda no LOGRADOURO → Tab
+        try:
+            buf = (self.ler_tela_console() or "").upper()
+            if "ENTER=SELECIONA" in buf.replace(" ", ""):
+                log.warning(
+                    "LOGRADOURO: lista F1 ainda aberta — Enter recovery"
+                )
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                self._enviar_enter(hwnd)
+                self._pausa("pos_enter_form")
+                hwnd = self._ativar_janela_apac(clicar_centro=False)
+                self._enviar_tab(hwnd)
+                self._pausa("pos_tab_apos_aceitar")
+        except ConsoleScreenError as exc:
+            log.warning("LOGRADOURO: checagem pos-F1 falhou: %s", exc)
         self._logradouro_aceito = True
-        log.info("LOGRADOURO: Tab (pular) — proximo campo.")
+        log.info("LOGRADOURO: F1 ok (%s) — proximo campo.", tipo)
 
     def aceitar_endereco_se_preenchido(self, lanc: Lancamento) -> None:
         """Apos LOGRADOURO: Tab se preenchido; vazio digita BIODATA ou Tab."""
@@ -3401,7 +3436,8 @@ class ApacAutomator:
 
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         self._digitar_texto(digitar, hwnd)
-        self._pausa("pos_digitar_curto")
+        # Filtro A-Z precisa assentar antes do Enter (evita pegar 1a linha errada)
+        self._pausa("pos_digitar")
 
         log.info("%s: Enter (selecionar profissional)", passo)
         self._enviar_enter(hwnd)
@@ -3415,6 +3451,55 @@ class ApacAutomator:
             )
             self._enviar_enter(hwnd)
             self._pausa("pos_enter_form")
+
+    def _ler_nome_profissional_tela(self) -> str:
+        """Le o valor do campo NOME na tela SOLICITACAO (apos CNS/CPF)."""
+        try:
+            campo, linha, _cx = identificar_campo_cursor(self._pids_apac())
+        except ConsoleScreenError as exc:
+            raise ApacBlockedError(
+                f"NOME profissional: falha ao ler cursor: {exc}"
+            ) from exc
+        if campo_compativel(campo, CampoApac.NOME, linha=linha):
+            bruto = (
+                extrair_valor_campo_linha(linha, campo=CampoApac.NOME) or ""
+            ).strip()
+            if bruto:
+                return bruto
+        # Fallback: procura linha NOME: no buffer (evita NOME DA MAE / RESP)
+        texto = self.ler_tela_console() or ""
+        for raw in texto.splitlines():
+            upper = raw.upper()
+            if "NOME DA" in upper or "NOME DO" in upper:
+                continue
+            if re.search(r"\bNOME\b", upper):
+                val = (
+                    extrair_valor_campo_linha(raw, campo=CampoApac.NOME) or ""
+                ).strip()
+                if val:
+                    return val
+        return ""
+
+    def _confirmar_nome_profissional_apos_f1(
+        self, nome_buscado: str, *, passo: str
+    ) -> None:
+        """
+        Apos F1 + Enter (pula CPF): confere NOME na tela com o buscado.
+        Se diferente, aborta (nao confirma o campo errado).
+        """
+        self._pausa("pre_campo")
+        lido = self._ler_nome_profissional_tela()
+        if not _nome_profissional_compativel(nome_buscado, lido):
+            raise ApacBlockedError(
+                f"{passo}: esperava profissional {nome_buscado!r}, "
+                f"veio {lido!r}. Pare e selecione o correto no F1."
+            )
+        log.info(
+            "%s: NOME confirmado %r (busca %r)",
+            passo,
+            lido[:60],
+            nome_buscado[:60],
+        )
 
     def preencher_solicitacao_autorizacao(self) -> None:
         """
@@ -3495,7 +3580,9 @@ class ApacAutomator:
         self._enviar_enter(hwnd)
         self._pausa("pos_enter_form")
 
+        self._confirmar_nome_profissional_apos_f1(medico, passo="CNS medico")
         log.info("NOME medico: Enter (aceitar preenchido)")
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
         self._enviar_enter(hwnd)
         self._pausa("pos_enter_form")
 
@@ -3512,7 +3599,11 @@ class ApacAutomator:
         self._enviar_enter(hwnd)
         self._pausa("pos_enter_form")
 
+        self._confirmar_nome_profissional_apos_f1(
+            autorizador, passo="CNS autorizador"
+        )
         log.info("NOME autorizador: Enter (aceitar preenchido)")
+        hwnd = self._ativar_janela_apac(clicar_centro=False)
         self._enviar_enter(hwnd)
         self._pausa("pos_enter_form")
 

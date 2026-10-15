@@ -1,6 +1,10 @@
 from unittest.mock import MagicMock
 
-from apac_bot.apac import ApacAutomator, refrescar_paciente_biodata
+from apac_bot.apac import (
+    CEP_PADRAO_APAC,
+    ApacAutomator,
+    refrescar_paciente_biodata,
+)
 from apac_bot.config import AppConfig
 from apac_bot.models import Lancamento, PacienteDados
 
@@ -124,6 +128,21 @@ def test_normalizar_nascimento_sexo_mascara_vazia():
     assert a._normalizar_leitura_campo("SEXO", "E") == ""
     assert a._normalizar_leitura_campo("SEXO", "F") == "F"
     assert a._normalizar_leitura_campo("SEXO", "M ETNIA :") == "M"
+
+
+def test_cep_para_digitar_usa_biodata():
+    a = ApacAutomator(_cfg(), dry_run=True)
+    lanc = _lanc()
+    lanc.paciente = PacienteDados(cep="65058-864")
+    assert a._cep_para_digitar_apac(lanc) == "65058864"
+
+
+def test_cep_para_digitar_usa_padrao_sem_origem():
+    a = ApacAutomator(_cfg(), dry_run=True)
+    lanc = _lanc()
+    lanc.paciente = PacienteDados(nome="SEM CEP")
+    assert a._cep_para_digitar_apac(lanc) == CEP_PADRAO_APAC
+    assert CEP_PADRAO_APAC == "65020070"
 
 
 def test_refrescar_usa_cadastro_aberto_sem_buscar_prontuario():

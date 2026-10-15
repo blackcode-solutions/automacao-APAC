@@ -4,22 +4,7 @@ import re
 import unicodedata
 from typing import Any, Optional
 
-# Mais especifico primeiro (TRAVESSA antes de RUA; AVENIDA antes de AV).
-_TIPOS_LOGRADOURO: tuple[str, ...] = (
-    "TRAVESSA",
-    "AVENIDA",
-    "ALAMEDA",
-    "POVOADO",
-    "ESTRADA",
-    "RODOVIA",
-    "PRACA",
-    "VIELA",
-    "BECO",
-    "LARGO",
-    "RUA",
-    "TV",
-    "AV",
-)
+from apac_bot.tipos_logradouro import tipos_logradouro_por_tamanho
 
 
 def cell_as_text(value: Any) -> str:
@@ -138,22 +123,28 @@ def _sem_acento_upper(texto: str) -> str:
 
 def tipo_logradouro_do_endereco(endereco: Optional[str]) -> Optional[str]:
     """
-    Detecta tipo de logradouro no texto do Endereco BIODATA (palavra inteira).
-    Ex.: 'SEGUNDA TRAVESSA BOM JESSUS' -> 'TRAVESSA'.
+    Detecta tipo de logradouro no texto do Endereco BIODATA.
+    Casa a frase mais longa da lista F1 (VIA LOCAL antes de VIA).
+    Ex.: 'VIA LOCAL 305' -> 'VIA LOCAL'; 'SEGUNDA TRAVESSA X' -> 'TRAVESSA'.
     """
     if not (endereco or "").strip():
         return None
-    norm = _sem_acento_upper(endereco)
-    # Tokens alfanumericos (ignora pontuacao)
-    tokens = set(re.findall(r"[A-Z0-9]+", norm))
-    for tipo in _TIPOS_LOGRADOURO:
-        if tipo in tokens:
-            # TV/AV sao abreviaturas; preferir forma longa na busca F1
-            if tipo == "TV":
-                return "TRAVESSA"
-            if tipo == "AV":
-                return "AVENIDA"
+    norm = _sem_acento_upper(endereco).replace("-", " ")
+    norm = " ".join(norm.split())
+    for tipo in tipos_logradouro_por_tamanho():
+        tipo_norm = _sem_acento_upper(tipo).replace("-", " ")
+        tipo_norm = " ".join(tipo_norm.split())
+        if not tipo_norm:
+            continue
+        padrao = rf"(?<![A-Z0-9]){re.escape(tipo_norm)}(?![A-Z0-9])"
+        if re.search(padrao, norm):
             return tipo
+    # Atalhos comuns fora da lista F1
+    tokens = set(re.findall(r"[A-Z0-9]+", norm))
+    if "TV" in tokens:
+        return "TRAVESSA"
+    if "AV" in tokens:
+        return "AVENIDA"
     return None
 
 
