@@ -28,7 +28,8 @@ from apac_bot.console_screen import (
     preview_tela,
 )
 
-# Pausas do open-apac — perfil via apac.velocidade (seguro|rapido)
+# Pausas do open-apac — perfil via apac.velocidade (seguro|rapido).
+# `rapido` e agressivo; se Magnético engolir teclas, volte para `seguro`.
 _TIMINGS_SEGURO: dict[str, float] = {
     "pre_campo": 1.0,
     "pos_digitar": 0.6,
@@ -55,39 +56,48 @@ _TIMINGS_SEGURO: dict[str, float] = {
     "pos_proc_digitar": 0.4,
     "pos_proc_tab": 0.45,
     "pos_f1": 0.8,
+    "char_down": 0.035,
+    "char_up": 0.045,
 }
 _TIMINGS_RAPIDO: dict[str, float] = {
-    "pre_campo": 0.25,
-    "pos_digitar": 0.35,
-    "pos_digitar_cnes": 0.35,
-    "pos_digitar_curto": 0.25,
-    "pos_tab": 0.35,
-    "pos_tab_apos_aceitar": 0.35,
-    "pos_sem_tab": 0.2,
-    "pos_enter_form": 0.45,
-    "enter_solto_timeout": 0.35,
-    "enter_solto_timeout_curto": 0.35,
-    "enter_solto_settle": 0.05,
-    "enter_solto_tail": 0.05,
-    "nav_enter": 0.8,
-    "pos_home": 0.05,
-    "pos_apos_digitar_numero": 0.15,
-    "pos_prontuario": 0.35,
-    "pos_raca_pre": 0.25,
-    "pos_raca_digitar": 0.25,
-    "pos_insert": 0.45,
-    "pos_tecla_foco": 0.06,
-    "pos_nav_retry": 0.6,
-    "pos_apos_ensure": 0.4,
-    "pos_proc_digitar": 0.12,
-    "pos_proc_tab": 0.15,
-    "pos_f1": 0.35,
+    "pre_campo": 0.08,
+    "pos_digitar": 0.15,
+    "pos_digitar_cnes": 0.18,
+    "pos_digitar_curto": 0.12,
+    "pos_tab": 0.12,
+    "pos_tab_apos_aceitar": 0.12,
+    "pos_sem_tab": 0.08,
+    "pos_enter_form": 0.22,
+    "enter_solto_timeout": 0.15,
+    "enter_solto_timeout_curto": 0.15,
+    "enter_solto_settle": 0.02,
+    "enter_solto_tail": 0.02,
+    "nav_enter": 0.4,
+    "pos_home": 0.03,
+    "pos_apos_digitar_numero": 0.08,
+    "pos_prontuario": 0.18,
+    "pos_raca_pre": 0.12,
+    "pos_raca_digitar": 0.12,
+    "pos_insert": 0.22,
+    "pos_tecla_foco": 0.03,
+    "pos_nav_retry": 0.3,
+    "pos_apos_ensure": 0.2,
+    "pos_proc_digitar": 0.06,
+    "pos_proc_tab": 0.08,
+    "pos_f1": 0.18,
+    "char_down": 0.015,
+    "char_up": 0.020,
 }
 _timings_ativos: dict[str, float] = dict(_TIMINGS_SEGURO)
 
 
 def aplicar_velocidade_apac(perfil: str) -> str:
-    """Ativa tabela de pausas. Retorna nome normalizado (seguro|rapido)."""
+    """
+    Ativa tabela de pausas. Retorna nome normalizado (seguro|rapido).
+
+    `rapido` e o perfil agressivo (pausas curtas + digitacao rapida).
+    Se o Magnético engolir teclas ou pular campos, use `seguro` como rollback.
+    """
     global _timings_ativos
     nome = (perfil or "seguro").strip().lower()
     if nome in {"rapido", "rápido", "fast", "quick"}:
@@ -461,12 +471,16 @@ def aguardar_enter_solto(timeout_s: float | None = None) -> None:
     Espera o Enter do input() no terminal ser solto antes de focar o APAC.
     Sem isso, o keyup/Enter vaza e pula campos (ex.: CNES SOLICITANTE).
     Timeouts/settles vêm do perfil apac.velocidade quando omitidos.
+    Se Enter ja esta solto, so aplica enter_solto_tail (sem loop ate timeout).
     """
     if timeout_s is None:
         timeout_s = timing_apac("enter_solto_timeout", 2.0)
     settle = timing_apac("enter_solto_settle", 0.18)
     tail = timing_apac("enter_solto_tail", 0.2)
     user32 = ctypes.windll.user32
+    if not bool(user32.GetAsyncKeyState(VK_RETURN) & 0x8000):
+        time.sleep(tail)
+        return
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         pressed = bool(user32.GetAsyncKeyState(VK_RETURN) & 0x8000)
@@ -740,9 +754,12 @@ def enviar_texto_hwnd(hwnd: int, texto: str) -> None:
     """
     Digita texto no APAC via keybd_event (força foco; nao usa pyautogui.write).
     Funciona apos s no terminal — espera Enter solto antes de ativar.
+    Intervalos por tecla vêm de apac.velocidade (char_down / char_up).
     """
     user32 = ctypes.windll.user32
     VK_SHIFT = 0x10
+    char_down = timing_apac("char_down", 0.035)
+    char_up = timing_apac("char_up", 0.045)
     aguardar_enter_solto()
     ativar_hwnd(hwnd)
     time.sleep(0.15)
@@ -760,11 +777,11 @@ def enviar_texto_hwnd(hwnd: int, texto: str) -> None:
         if shift & 1:
             user32.keybd_event(VK_SHIFT, 0, 0, 0)
         user32.keybd_event(vk, 0, 0, 0)
-        time.sleep(0.035)
+        time.sleep(char_down)
         user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
         if shift & 1:
             user32.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
-        time.sleep(0.045)
+        time.sleep(char_up)
 
 
 def retangulo_hwnd(hwnd: int) -> tuple[int, int, int, int]:
@@ -1300,6 +1317,34 @@ class ApacAutomator:
     def _pausa(self, chave: str) -> None:
         """Sleep conforme apac.velocidade (seguro|rapido)."""
         time.sleep(timing_apac(chave))
+
+    def _aguardar_avanco_campo(
+        self,
+        campo_antes: CampoApac,
+        *,
+        timeout_s: float | None = None,
+    ) -> bool:
+        """
+        Apos Tab: poll ate o cursor sair de campo_antes (ou timeout).
+        Retorna True se avancou; False se timeout / erro de buffer.
+        """
+        if timeout_s is None:
+            timeout_s = timing_apac("pos_tab_apos_aceitar", 0.9)
+        poll = 0.04
+        deadline = time.time() + max(0.0, timeout_s)
+        while time.time() < deadline:
+            try:
+                campo_agora, linha_agora, _cx = identificar_campo_cursor(
+                    self._pids_apac()
+                )
+                if not campo_compativel(
+                    campo_agora, campo_antes, linha=linha_agora
+                ):
+                    return True
+            except ConsoleScreenError:
+                return False
+            time.sleep(poll)
+        return False
 
     def _intervalo_nav_enter(self) -> float:
         """Pausa entre Enters da navegacao MENU → lista."""
@@ -1998,7 +2043,6 @@ class ApacAutomator:
             if not ok:
                 raise ApacBlockedError(f"operador recusou {acao} no {rotulo}")
 
-        aguardar_enter_solto()
         hwnd = self._ativar_janela_apac(clicar_centro=False)
         enviou_tab = False
         if digitar_antes:
@@ -2046,7 +2090,13 @@ class ApacAutomator:
             enviou_tab = True
         else:
             log.info("%s: aceito sem Tab — foco permanece no campo.", rotulo)
-        self._pausa("pos_tab_apos_aceitar" if enviou_tab else "pos_sem_tab")
+        if enviou_tab and campo_esp is not None:
+            if not self._aguardar_avanco_campo(campo_esp):
+                self._pausa("pos_tab_apos_aceitar")
+        elif enviou_tab:
+            self._pausa("pos_tab_apos_aceitar")
+        else:
+            self._pausa("pos_sem_tab")
 
         # Apos Tab: so buffer (nao clipboard) — se ja saiu da identificacao, para.
         if enviou_tab:

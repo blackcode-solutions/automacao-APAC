@@ -153,6 +153,7 @@ class BiodataConnector:
         _dismiss_blocking_overlays(page)
         timeout_ms = int(self.cfg.timeouts.get("biodata_ms", 15000))
         # /consultorio pode demorar ou nao ter menu — retry + fallback /home
+        # Sleeps fixos: a tela demora a montar; wait_for sozinho e insuficiente.
         _aguardar_menu_lateral(page, self.cfg, timeout_ms=timeout_ms)
         page.wait_for_timeout(800)
         modulo = page.locator(nav["modulo_atendimento"]).first
@@ -367,6 +368,44 @@ class BiodataConnector:
         self._abrir_cadastro_pacientes()
         self._botao_pesquisar().wait_for(state="visible", timeout=15000)
 
+    def _preencher_campo_busca(self, campo, termo: str) -> None:
+        """Preenche busca: fill() primeiro; se dropdown nao abrir, type(delay=20)."""
+        assert self._page is not None
+        page = self._page
+        campo.click()
+        try:
+            campo.fill("")
+        except Exception:
+            # Campo Tom Select pode rejeitar fill vazio; segue com fill(termo)
+            pass
+        try:
+            campo.fill(termo)
+            page.keyboard.press("End")
+        except Exception as exc:
+            log.warning(
+                "[biodata] fill(%r) falhou (%s) — type(delay=20).",
+                termo[:40],
+                exc,
+            )
+            campo.type(termo, delay=20)
+            return
+        dropdown = page.locator(
+            "#clienteCadastroId-ts-dropdown .option, "
+            "#clienteCadastroId-ts-dropdown [data-selectable]"
+        )
+        try:
+            dropdown.first.wait_for(state="visible", timeout=2500)
+            return
+        except Exception:
+            log.info(
+                "[biodata] dropdown ausente apos fill — retry type(delay=20)."
+            )
+        try:
+            campo.fill("")
+        except Exception:
+            pass
+        campo.type(termo, delay=20)
+
     def _clicar_pesquisar_e_buscar(self, termo: str, campo_sel: str) -> None:
         """Re-pesquisa na tela atual: só Pesquisar + nome (sem menu Atendimento)."""
         assert self._page is not None
@@ -379,12 +418,7 @@ class BiodataConnector:
         botao.click()
         campo = page.locator(campo_sel).last
         campo.wait_for(state="visible")
-        campo.click()
-        try:
-            campo.fill("")
-        except Exception:
-            pass
-        campo.type(termo, delay=50)
+        self._preencher_campo_busca(campo, termo)
 
     def _abrir_dialogo_pesquisar_cliente(self, termo: str, campo_sel: str) -> None:
         assert self._page is not None
@@ -394,12 +428,7 @@ class BiodataConnector:
         self._botao_pesquisar().click()
         campo = page.locator(campo_sel).last
         campo.wait_for(state="visible")
-        campo.click()
-        try:
-            campo.fill("")
-        except Exception:
-            pass
-        campo.type(termo, delay=50)
+        self._preencher_campo_busca(campo, termo)
 
     def _confirmar_opcao_e_extrair(self, opcao_locator) -> Optional[PacienteDados]:
         assert self._page is not None
@@ -407,6 +436,7 @@ class BiodataConnector:
         loc = self._loc()
         opcao_locator.click()
         page.locator(loc["botao_confirmar_pesquisa"]).last.click()
+        # Sleep fixo: cadastro demora a montar apos Confirmar.
         page.wait_for_timeout(1200)
         self._tratar_reauth_se_necessario()
         return self._extrair_cadastro()
