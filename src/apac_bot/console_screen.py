@@ -16,7 +16,11 @@ log = setup_logging()
 
 # AttachConsole(ATTACH_PARENT_PROCESS)
 _ATTACH_PARENT_PROCESS = 0xFFFFFFFF
-_STD_OUTPUT_HANDLE = -11
+_INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+_GENERIC_READ = 0x80000000
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_OPEN_EXISTING = 3
 
 _RE_COD_PROCEDIMENTO = re.compile(r"\d{2}\.\d{2}\.\d{2}\.\d{3}-\d")
 
@@ -177,8 +181,18 @@ def _kernel32():
     k32.AttachConsole.restype = wintypes.BOOL
     k32.FreeConsole.argtypes = []
     k32.FreeConsole.restype = wintypes.BOOL
-    k32.GetStdHandle.argtypes = [wintypes.DWORD]
-    k32.GetStdHandle.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
     k32.GetConsoleScreenBufferInfo.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(CONSOLE_SCREEN_BUFFER_INFO),
@@ -195,32 +209,73 @@ def _kernel32():
     return k32
 
 
-def ler_buffer_console(pid: int) -> str:
+def _abrir_console_apac(pid: int) -> tuple[ctypes.WinDLL, int]:
     """
-    Anexa ao console do processo `pid`, le a janela visivel do buffer e devolve texto.
-    Restaura o console do processo atual (pai) ao final.
+    Anexa ao console do APAC e abre CONOUT$ (buffer real).
+
+    Usa CreateFile(CONOUT$) em vez de GetStdHandle(STD_OUTPUT): com stdout
+    redirecionado (ex.: UI com PIPE), GetStdHandle continua apontando para o
+    pipe e GetConsoleScreenBufferInfo falha com WinError 6.
     """
     if pid <= 0:
         raise ConsoleScreenError("PID invalido para leitura do console.")
 
     k32 = _kernel32()
     k32.FreeConsole()
+    if not k32.AttachConsole(wintypes.DWORD(pid)):
+        err = ctypes.GetLastError()
+        raise ConsoleScreenError(
+            f"AttachConsole falhou para PID {pid} (WinError {err}). "
+            "O APAC precisa estar no console classico (conhost), nao no "
+            "Windows Terminal. Feche o APAC e deixe a automacao reabrir."
+        )
+
+    h_out = k32.CreateFileW(
+        "\\\\.\\CONOUT$",
+        _GENERIC_READ,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None,
+        _OPEN_EXISTING,
+        0,
+        None,
+    )
+    if not h_out or h_out == _INVALID_HANDLE_VALUE:
+        err = ctypes.GetLastError()
+        k32.FreeConsole()
+        k32.AttachConsole(wintypes.DWORD(_ATTACH_PARENT_PROCESS))
+        raise ConsoleScreenError(
+            f"CreateFile(CONOUT$) falhou apos AttachConsole "
+            f"(PID {pid}, WinError {err})."
+        )
+    return k32, int(h_out)
+
+
+def _fechar_console_apac(
+    k32: ctypes.WinDLL,
+    h_out: int | None,
+    *,
+    attached: bool,
+) -> None:
+    """Fecha CONOUT$, desanexa do APAC e tenta reanexar ao console pai."""
+    if h_out and h_out != _INVALID_HANDLE_VALUE:
+        k32.CloseHandle(wintypes.HANDLE(h_out))
+    if attached:
+        k32.FreeConsole()
+    # Reanexa ao console pai (Cursor/PowerShell) se existir
+    k32.AttachConsole(wintypes.DWORD(_ATTACH_PARENT_PROCESS))
+
+
+def ler_buffer_console(pid: int) -> str:
+    """
+    Anexa ao console do processo `pid`, le a janela visivel do buffer e devolve texto.
+    Restaura o console do processo atual (pai) ao final.
+    """
+    k32: ctypes.WinDLL | None = None
+    h_out: int | None = None
     attached = False
     try:
-        if not k32.AttachConsole(wintypes.DWORD(pid)):
-            err = ctypes.GetLastError()
-            raise ConsoleScreenError(
-                f"AttachConsole falhou para PID {pid} (WinError {err}). "
-                "O APAC precisa estar no console classico (conhost), nao no "
-                "Windows Terminal. Feche o APAC e deixe a automacao reabrir."
-            )
+        k32, h_out = _abrir_console_apac(pid)
         attached = True
-
-        h_out = k32.GetStdHandle(wintypes.DWORD(_STD_OUTPUT_HANDLE & 0xFFFFFFFF))
-        if not h_out or h_out == wintypes.HANDLE(-1).value:
-            raise ConsoleScreenError(
-                f"GetStdHandle(STD_OUTPUT) falhou apos AttachConsole (PID {pid})."
-            )
 
         info = CONSOLE_SCREEN_BUFFER_INFO()
         if not k32.GetConsoleScreenBufferInfo(h_out, ctypes.byref(info)):
@@ -271,10 +326,8 @@ def ler_buffer_console(pid: int) -> str:
             )
         return texto
     finally:
-        if attached:
-            k32.FreeConsole()
-        # Reanexa ao console pai (Cursor/PowerShell) se existir
-        k32.AttachConsole(wintypes.DWORD(_ATTACH_PARENT_PROCESS))
+        if k32 is not None:
+            _fechar_console_apac(k32, h_out, attached=attached)
 
 
 def ler_buffer_apac(pids: list[int]) -> str:
@@ -833,23 +886,12 @@ def ler_linha_e_cursor(pid: int) -> tuple[str, int, int]:
     Le a linha do buffer onde esta o cursor (sem enviar teclas).
     Retorna (linha, cursor_x, cursor_y).
     """
-    if pid <= 0:
-        raise ConsoleScreenError("PID invalido para leitura do cursor.")
-
-    k32 = _kernel32()
-    k32.FreeConsole()
+    k32: ctypes.WinDLL | None = None
+    h_out: int | None = None
     attached = False
     try:
-        if not k32.AttachConsole(wintypes.DWORD(pid)):
-            err = ctypes.GetLastError()
-            raise ConsoleScreenError(
-                f"AttachConsole falhou para PID {pid} (WinError {err})."
-            )
+        k32, h_out = _abrir_console_apac(pid)
         attached = True
-
-        h_out = k32.GetStdHandle(wintypes.DWORD(_STD_OUTPUT_HANDLE & 0xFFFFFFFF))
-        if not h_out or h_out == wintypes.HANDLE(-1).value:
-            raise ConsoleScreenError("GetStdHandle(STD_OUTPUT) falhou.")
 
         info = CONSOLE_SCREEN_BUFFER_INFO()
         if not k32.GetConsoleScreenBufferInfo(h_out, ctypes.byref(info)):
@@ -885,9 +927,8 @@ def ler_linha_e_cursor(pid: int) -> tuple[str, int, int]:
         # cx relativo ao inicio da string lida (srWindow.Left)
         return linha, max(0, cx - left), cy
     finally:
-        if attached:
-            k32.FreeConsole()
-        k32.AttachConsole(wintypes.DWORD(_ATTACH_PARENT_PROCESS))
+        if k32 is not None:
+            _fechar_console_apac(k32, h_out, attached=attached)
 
 
 def ler_valor_campo_cursor(

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from apac_bot.config import AppConfig, biodata_locators_pendentes, config_dir, resolve_path
+from apac_bot.connectors.biodata_session_stamp import (
+    gravar_last_auth_at,
+    sessao_precisa_renovacao_preventiva,
+)
 from apac_bot.logging_safe import setup_logging
 from apac_bot.models import PacienteDados
 from apac_bot.normalize import sexo_para_apac, tem_cpf_valido
@@ -205,6 +209,7 @@ class BiodataConnector:
             return None
         self._ensure_browser()
         assert self._page is not None
+        self._renovar_se_sessao_antiga()
         loc = self._loc()
         campo_sel = loc.get("campo_busca_id") or loc.get("campo_busca_nome")
         if not campo_sel:
@@ -241,6 +246,7 @@ class BiodataConnector:
         prontuario: Optional[str] = None,
     ) -> list[PacienteDados]:
         self._ensure_browser()
+        self._renovar_se_sessao_antiga()
         campo_sel = self._loc()["campo_busca_nome"]
         lista = self._buscar_lista_no_dialogo(
             termo=nome, campo_sel=campo_sel, prontuario_alvo=prontuario
@@ -636,63 +642,24 @@ class BiodataConnector:
         """
         if self._page is None:
             return
-        page = self._page
-        logout = dict(DEFAULT_LOGOUT_LOCATORS)
-        logout.update(
-            {
-                k: v
-                for k, v in (self.cfg.biodata.get("logout") or {}).items()
-                if v
-            }
+        _sair_para_login(
+            self._page,
+            self.cfg,
+            fechar_dialogo=self._fechar_dialogo_pesquisa,
         )
-        locs = login_locators(self.cfg)
-        log.info("BIODATA: saindo para tela de login (Sair).")
-        try:
-            self._fechar_dialogo_pesquisa()
-        except Exception:
-            pass
-        _dismiss_blocking_overlays(page, self.cfg)
-        menu_sel = str(logout.get("menu_usuario") or "")
-        if menu_sel:
-            try:
-                menu = page.locator(menu_sel)
-                if menu.count() and menu.first.is_visible():
-                    menu.first.click(timeout=5000)
-                    page.wait_for_timeout(400)
-            except Exception as exc:
-                log.debug("Menu usuario logout: %s", exc)
-        botao_sel = str(
-            logout.get("botao_sair") or DEFAULT_LOGOUT_LOCATORS["botao_sair"]
+
+    def _renovar_se_sessao_antiga(self) -> None:
+        """Renovação preventiva (3h30) antes de consulta; reabre Cadastro."""
+        assert self._page is not None
+        if not sessao_precisa_renovacao_preventiva(self.cfg):
+            return
+        _renovar_sessao_preventiva(
+            self._page,
+            self.cfg,
+            fechar_dialogo=self._fechar_dialogo_pesquisa,
         )
-        clicou = False
-        try:
-            botao = page.get_by_role("button", name="Sair")
-            if botao.count():
-                # Evita Sair do modal Pesquisar Cliente: preferir o ultimo visivel
-                for i in range(botao.count() - 1, -1, -1):
-                    b = botao.nth(i)
-                    try:
-                        if b.is_visible():
-                            b.click(timeout=5000)
-                            clicou = True
-                            break
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        if not clicou:
-            page.locator(botao_sel).last.click(timeout=8000)
-            clicou = True
-        page.wait_for_timeout(1000)
-        try:
-            page.locator(locs["campo_usuario"]).first.wait_for(
-                state="visible", timeout=10000
-            )
-            log.info("BIODATA: tela de login apos Sair.")
-        except Exception:
-            log.warning(
-                "BIODATA: Sair clicado, mas campo usuario nao confirmado."
-            )
+        self._cadastro_aberto = False
+        self._abrir_cadastro_pacientes()
 
     def close(self) -> None:
         try:
@@ -713,6 +680,107 @@ class BiodataConnector:
             if getattr(self, "_pw", None) is not None:
                 self._pw.stop()
                 self._pw = None
+
+
+def _sair_para_login(
+    page,
+    cfg: AppConfig,
+    *,
+    fechar_dialogo: Optional[Callable[[], None]] = None,
+) -> None:
+    """Logout UI: menu usuario (se houver) + Sair → tela de login."""
+    logout = dict(DEFAULT_LOGOUT_LOCATORS)
+    logout.update(
+        {
+            k: v
+            for k, v in (cfg.biodata.get("logout") or {}).items()
+            if v
+        }
+    )
+    locs = login_locators(cfg)
+    log.info("BIODATA: saindo para tela de login (Sair).")
+    if fechar_dialogo is not None:
+        try:
+            fechar_dialogo()
+        except Exception:
+            pass
+    _dismiss_blocking_overlays(page, cfg)
+    menu_sel = str(logout.get("menu_usuario") or "")
+    if menu_sel:
+        try:
+            menu = page.locator(menu_sel)
+            if menu.count() and menu.first.is_visible():
+                menu.first.click(timeout=5000)
+                page.wait_for_timeout(400)
+        except Exception as exc:
+            log.debug("Menu usuario logout: %s", exc)
+    botao_sel = str(
+        logout.get("botao_sair") or DEFAULT_LOGOUT_LOCATORS["botao_sair"]
+    )
+    clicou = False
+    try:
+        botao = page.get_by_role("button", name="Sair")
+        if botao.count():
+            # Evita Sair do modal Pesquisar Cliente: preferir o ultimo visivel
+            for i in range(botao.count() - 1, -1, -1):
+                b = botao.nth(i)
+                try:
+                    if b.is_visible():
+                        b.click(timeout=5000)
+                        clicou = True
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    if not clicou:
+        page.locator(botao_sel).last.click(timeout=8000)
+        clicou = True
+    page.wait_for_timeout(1000)
+    try:
+        page.locator(locs["campo_usuario"]).first.wait_for(
+            state="visible", timeout=10000
+        )
+        log.info("BIODATA: tela de login apos Sair.")
+    except Exception:
+        log.warning(
+            "BIODATA: Sair clicado, mas campo usuario nao confirmado."
+        )
+
+
+def _renovar_sessao_preventiva(
+    page,
+    cfg: AppConfig,
+    *,
+    fechar_dialogo: Optional[Callable[[], None]] = None,
+) -> None:
+    """
+    Sessão >= 3h30 (ou sem stamp): Sair (se autenticado) + login completo.
+    Grava stamp somente via ensure_biodata_login / reauth bem-sucedido.
+    """
+    locs = login_locators(cfg)
+    log.info(
+        "BIODATA: renovacao preventiva de sessao "
+        "(>= 3h30 desde ultima autenticacao ou stamp ausente)."
+    )
+    if _pagina_autenticada(page, locs) or _menu_lateral_visivel(page):
+        try:
+            _sair_para_login(page, cfg, fechar_dialogo=fechar_dialogo)
+        except Exception as exc:
+            log.warning(
+                "BIODATA: falha no Sair antes da renovacao preventiva: %s "
+                "— seguindo para login completo.",
+                exc,
+            )
+    ensure_biodata_login(page, cfg, force_full=True)
+    if not _sessao_biodata_ok(page, cfg):
+        raise BiodataMappingError(
+            "Renovacao preventiva falhou: sessao BIODATA nao confirmada apos login. "
+            "Verifique credenciais em secrets.local.json."
+        )
+    # Garante stamp mesmo se ensure retornou cedo por caminho atipico
+    if sessao_precisa_renovacao_preventiva(cfg):
+        gravar_last_auth_at(cfg)
 
 
 def _titulo_reauth(cfg: Optional[AppConfig] = None) -> str:
@@ -755,6 +823,7 @@ def tratar_reauth_se_necessario(page, cfg: AppConfig) -> None:
     creds = load_biodata_credentials(cfg)
     if creds is None:
         input("Faça a autenticação no navegador e pressione Enter...")
+        gravar_last_auth_at(cfg)
         return
     senha_sel = str(
         reauth.get("campo_senha")
@@ -793,6 +862,8 @@ def tratar_reauth_se_necessario(page, cfg: AppConfig) -> None:
             "Modal Autenticação ainda visivel apos F5 — "
             "verifique senha em secrets.local.json."
         )
+        return
+    gravar_last_auth_at(cfg)
 
 
 def login_locators(cfg: AppConfig) -> dict[str, str]:
@@ -918,7 +989,12 @@ def _abrir_ou_reusar_sessao(page, cfg: AppConfig) -> None:
     """
     Abre /home com o perfil persistente. Se a sessao de ~4h ainda vale,
     nao faz login. Se reauth (senha+LOGIN+F5) falhar, login completo em biodata.url.
+    Renovacao preventiva (>= 3h30): Sair + login completo antes de /home.
     """
+    if sessao_precisa_renovacao_preventiva(cfg):
+        _renovar_sessao_preventiva(page, cfg)
+        # Stamp fresco: segue para /home com sessao nova (sem loop).
+
     home = _url_home_biodata(cfg)
     if not home:
         raise BiodataMappingError(
@@ -1121,6 +1197,7 @@ def ensure_biodata_login(
             "crie secrets.local.json a partir de secrets.example.json para automatizar."
         )
         input("Após o login no BIODATA, pressione Enter neste terminal para continuar...")
+        gravar_last_auth_at(cfg)
         return
 
     timeout_ms = int(cfg.timeouts.get("biodata_ms", 15000))
@@ -1159,6 +1236,7 @@ def ensure_biodata_login(
         try:
             _aguardar_login_ok(page, locs, timeout_ms)
             log.info("Login automático concluído.")
+            gravar_last_auth_at(cfg)
             return
         except Exception as exc:
             ultimo_erro = exc
