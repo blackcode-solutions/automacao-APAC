@@ -99,6 +99,11 @@ class AppConfig:
         return dict(self.raw.get("apac") or {})
 
     @property
+    def export_set(self) -> dict[str, Any]:
+        """Config do gerador de arquivo .SET (layout INTERNO)."""
+        return dict(self.raw.get("export_set") or {})
+
+    @property
     def timeouts(self) -> dict[str, Any]:
         return dict(self.raw.get("timeouts") or {})
 
@@ -132,6 +137,21 @@ def load_config(path: str | Path) -> AppConfig:
     return cfg
 
 
+def biodata_modo(cfg: AppConfig) -> str:
+    """
+    Resolve biodata.modo: 'api' | 'browser'.
+    Default 'api' se existir biodata.api.base_url; senão 'browser'.
+    """
+    biodata = cfg.biodata
+    raw = str(biodata.get("modo") or "").strip().lower()
+    if raw in {"api", "browser"}:
+        return raw
+    api = biodata.get("api") or {}
+    if str(api.get("base_url") or "").strip():
+        return "api"
+    return "browser"
+
+
 def validate_config(
     cfg: AppConfig,
     *,
@@ -160,15 +180,44 @@ def validate_config(
         if key not in colunas or not colunas[key]:
             erros.append(f"planilha.colunas.{key} é obrigatório.")
 
-    if for_biodata_real or (origem == "biodata" and for_live):
-        missing = biodata_locators_pendentes(cfg)
-        if missing:
+    if origem == "biodata":
+        pront = cfg.raw.get("planilha_prontuarios") or {}
+        if not str(pront.get("caminho") or "").strip():
             erros.append(
-                "Localizadores BIODATA incompletos (consulta real bloqueada): "
-                + ", ".join(missing)
+                "planilha_prontuarios.caminho é obrigatório quando "
+                "sistema_origem=biodata."
             )
-        if not (cfg.biodata.get("url")):
-            erros.append("biodata.url é obrigatório para consulta real.")
+
+    precisa_biodata = for_biodata_real or (origem == "biodata" and for_live)
+    if precisa_biodata:
+        modo = biodata_modo(cfg)
+        if modo == "api":
+            api = cfg.biodata.get("api") or {}
+            if not str(api.get("base_url") or "").strip():
+                erros.append("biodata.api.base_url é obrigatório no modo API.")
+            id_sac = api.get("id_sac")
+            if id_sac is None or str(id_sac).strip() == "":
+                erros.append("biodata.api.id_sac é obrigatório no modo API.")
+            from apac_bot.secrets import SecretsError, load_biodata_credentials
+
+            try:
+                creds = load_biodata_credentials(cfg)
+            except SecretsError as exc:
+                erros.append(f"Credenciais BIODATA inválidas: {exc}")
+            else:
+                if creds is None:
+                    erros.append(
+                        "Modo API exige secrets.local.json com usuario e senha."
+                    )
+        else:
+            missing = biodata_locators_pendentes(cfg)
+            if missing:
+                erros.append(
+                    "Localizadores BIODATA incompletos (consulta real bloqueada): "
+                    + ", ".join(missing)
+                )
+            if not (cfg.biodata.get("url")):
+                erros.append("biodata.url é obrigatório para consulta real.")
 
     if for_live:
         apac = cfg.apac

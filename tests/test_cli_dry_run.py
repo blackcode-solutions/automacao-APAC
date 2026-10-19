@@ -38,6 +38,8 @@ def test_biodata_bloqueado_por_locators(tmp_path: Path):
     cfg_path = _prepare(tmp_path)
     raw = json.loads(cfg_path.read_text(encoding="utf-8"))
     raw["sistema_origem"] = "biodata"
+    raw["biodata"]["modo"] = "browser"
+    raw["biodata"].pop("api", None)
     raw["biodata"]["navegacao"] = {
         "modulo_atendimento": None,
         "campo_busca_menu": None,

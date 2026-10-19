@@ -11,8 +11,10 @@ if __name__ == "__main__" and str(Path(__file__).resolve().parents[1]) not in sy
 from apac_bot.apac import ApacBlockedError, dump_apac_screen, open_apac_session
 from apac_bot.config import ConfigError, load_config
 from apac_bot.connectors.biodata import BiodataMappingError, open_biodata_session
+from apac_bot.connectors.biodata_api import BiodataApiError
 from apac_bot.logging_safe import setup_logging
 from apac_bot.pipeline import PipelineError, cmd_fetch, cmd_run, cmd_status
+from apac_bot.set_pipeline import cmd_gerar_set
 from apac_bot.sheet import SheetError, create_example_workbook
 
 
@@ -82,6 +84,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_config_arg(p_apac)
 
+    p_set = sub.add_parser(
+        "gerar-set",
+        help=(
+            "Consulta BIODATA e gera arquivo .SET (layout INTERNO) "
+            "sem digitar no APAC; limite via export_set.limite_pacientes"
+        ),
+    )
+    _add_config_arg(p_set)
+    p_set.add_argument("--planilha", default=None)
+    p_set.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Override de export_set.limite_pacientes",
+    )
+
     p_dump = sub.add_parser(
         "dump-apac-screen",
         help=(
@@ -150,11 +168,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "open-apac":
             open_apac_session(cfg)
             return 0
+        if args.command == "gerar-set":
+            return cmd_gerar_set(cfg, planilha=planilha, limit=args.limit)
         if args.command == "dump-apac-screen":
             path = dump_apac_screen(cfg)
             log.info("Dump concluido: %s", path)
             return 0
-    except (BiodataMappingError, ApacBlockedError) as exc:
+    except (BiodataMappingError, BiodataApiError, ApacBlockedError) as exc:
         log.error("%s", exc)
         return 2
     except (ConfigError, SheetError, PipelineError) as exc:

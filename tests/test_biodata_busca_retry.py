@@ -14,6 +14,7 @@ def test_buscar_por_nome_recupera_sessao_e_rebusca():
     conn._page = MagicMock()
     conn._cadastro_aberto = True
     conn._ensure_browser = MagicMock()
+    conn._renovar_se_sessao_antiga = MagicMock()
     conn._loc = MagicMock(
         return_value={"campo_busca_nome": "#clienteCadastroId-ts-control"}
     )
@@ -35,6 +36,7 @@ def test_buscar_por_nome_sem_retry_se_ja_achou():
     conn.cfg = MagicMock()
     conn._page = MagicMock()
     conn._ensure_browser = MagicMock()
+    conn._renovar_se_sessao_antiga = MagicMock()
     conn._loc = MagicMock(
         return_value={"campo_busca_nome": "#clienteCadastroId-ts-control"}
     )
@@ -54,6 +56,7 @@ def test_buscar_por_id_recupera_quando_vazio():
     conn.cfg = MagicMock()
     conn._page = MagicMock()
     conn._ensure_browser = MagicMock()
+    conn._renovar_se_sessao_antiga = MagicMock()
     conn._loc = MagicMock(
         return_value={
             "campo_busca_id": "#campoId",

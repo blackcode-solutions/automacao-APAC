@@ -7,6 +7,7 @@ from apac_bot.apac import ApacAutomator, ApacBlockedError, ApacInterruptedError
 from apac_bot.config import AppConfig, config_dir, resolve_path, validate_config
 from apac_bot.connectors import build_connector
 from apac_bot.connectors.biodata import BiodataMappingError
+from apac_bot.connectors.biodata_api import BiodataApiError
 from apac_bot.logging_safe import setup_logging, short_id
 from apac_bot.models import EstadoLancamento, Lancamento, PacienteDados
 from apac_bot.normalize import nascimento_ddmmaaaa, sexo_para_apac, tem_cpf_valido
@@ -152,7 +153,7 @@ def cmd_fetch(
 
     try:
         connector = build_connector(cfg.sistema_origem, cfg)
-    except BiodataMappingError as exc:
+    except (BiodataMappingError, BiodataApiError) as exc:
         log.error("%s", exc)
         return 2
 
@@ -213,7 +214,7 @@ def cmd_run(
 
     try:
         connector = build_connector(cfg.sistema_origem, cfg)
-    except BiodataMappingError as exc:
+    except (BiodataMappingError, BiodataApiError) as exc:
         log.error("%s", exc)
         return 2
 

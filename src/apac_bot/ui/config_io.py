@@ -91,6 +91,16 @@ CNES_POR_CLINICA: dict[str, dict[str, str]] = {
 
 CNES_UI_KEYS: tuple[str, ...] = ("cnes_solicitante", "cnes_executante")
 
+# Defaults do bloco planilha_prontuarios quando a UI cria o caminho pela 1ª vez.
+PLANILHA_PRONTUARIOS_DEFAULTS: dict[str, Any] = {
+    "aba": "APAC ",
+    "linha_cabecalho": 3,
+    "colunas": {
+        "PRONTUARIO": "Prontuário",
+        "CLIENTE": "Cliente",
+    },
+}
+
 
 def normalizar_sistema_origem(valor: str) -> str:
     return str(valor or "").strip().lower()
@@ -131,6 +141,7 @@ class UiFormData:
     sistema_origem: str = "biodata"
     clinica_id: str = ""
     planilha_caminho: str = ""
+    planilha_prontuarios_caminho: str = ""
     paciente_inicio: str = ""
     dados_fixos: dict[str, str] = field(default_factory=dict)
 
@@ -163,6 +174,7 @@ def load_raw(path: Path) -> dict[str, Any]:
 
 def form_from_raw(raw: dict[str, Any]) -> UiFormData:
     planilha = raw.get("planilha") or {}
+    prontuarios = raw.get("planilha_prontuarios") or {}
     apac = raw.get("apac") or {}
     fixos = raw.get("dados_fixos") or {}
     dados: dict[str, str] = {}
@@ -181,6 +193,7 @@ def form_from_raw(raw: dict[str, Any]) -> UiFormData:
         sistema_origem=sistema,
         clinica_id=clinica,
         planilha_caminho=str(planilha.get("caminho") or "").strip(),
+        planilha_prontuarios_caminho=str(prontuarios.get("caminho") or "").strip(),
         paciente_inicio=str(apac.get("paciente_inicio") or "").strip(),
         dados_fixos=dados,
     )
@@ -215,6 +228,8 @@ def validate_form(form: UiFormData) -> list[str]:
         )
     if not form.planilha_caminho.strip():
         erros.append("Caminho da planilha é obrigatório.")
+    if not form.planilha_prontuarios_caminho.strip():
+        erros.append("Caminho da planilha de prontuários é obrigatório.")
 
     fixos = form.dados_fixos_completos()
     for chave in ("cnes_solicitante", "cnes_executante"):
@@ -256,6 +271,21 @@ def merge_form_into_raw(raw: dict[str, Any], form: UiFormData) -> dict[str, Any]
     planilha = dict(out.get("planilha") or {})
     planilha["caminho"] = form.planilha_caminho.strip()
     out["planilha"] = planilha
+
+    prontuarios = dict(out.get("planilha_prontuarios") or {})
+    if not prontuarios:
+        prontuarios = deepcopy(PLANILHA_PRONTUARIOS_DEFAULTS)
+    else:
+        for key, valor in PLANILHA_PRONTUARIOS_DEFAULTS.items():
+            if key == "colunas":
+                cols = dict(prontuarios.get("colunas") or {})
+                for ck, cv in valor.items():
+                    cols.setdefault(ck, cv)
+                prontuarios["colunas"] = cols
+            else:
+                prontuarios.setdefault(key, valor)
+    prontuarios["caminho"] = form.planilha_prontuarios_caminho.strip()
+    out["planilha_prontuarios"] = prontuarios
 
     apac = dict(out.get("apac") or {})
     apac["paciente_inicio"] = form.paciente_inicio.strip()

@@ -2,6 +2,14 @@
   "clinica_id": "clinica_exemplo",
   "sistema_origem": "mock",
   "biodata": {
+    "modo": "api",
+    "api": {
+      "base_url": "https://apis.biodataweb.net/oftalmocentro91/biodata",
+      "id_sac": 91,
+      "param_nome": "strCliente",
+      "paginacao_nome": "0,20",
+      "authorization_prefix": "Bearer"
+    },
     "url": "https://exemplo.biodata.local/login",
     "user_data_dir": "browser_profile",
     "secrets_file": "secrets.local.json",
@@ -99,7 +107,29 @@
     "medico_solicitante_nome": "0RCELIO REZENDE",
     "autorizador_cns": "708107527671032",
     "autorizador_nome": "MARQUES HENRIQUE MARTINS FEITO",
-    "cod_orgao_emiss": "M211130001"
+    "cod_orgao_emiss": "M211130001",
+    "cid_principal": "H250",
+    "codigo_servico": "131",
+    "codigo_classificacao": "003",
+    "tipo_atendimento": "00",
+    "uf_ibge": "21",
+    "nacionalidade": "010",
+    "raca": "03",
+    "codigo_logradouro": "008",
+    "municipio_ibge_padrao": "211230",
+    "nome_responsavel_padrao": "O MESMO"
+  },
+  "export_set": {
+    "limite_pacientes": 0,
+    "pasta_saida": "data/export_set",
+    "prefixo_arquivo": "APOFTAL",
+    "competencia_padrao": "202609",
+    "orgao_origem": "CLINICA DE SERVICOS MEDICOS GE",
+    "sigla": "CSMG",
+    "cgc": "01192155000210",
+    "orgao_destino": "SECRETARIA DE SAUDE",
+    "destino_in": "M",
+    "versao": "Versao 04.01"
   },
   "apac": {
     "titulo_janela": "APAC MAGNETICO",

@@ -31,6 +31,15 @@ def _base_raw() -> dict:
             "aba": "Lançamentos",
             "colunas": {"PACIENTE": "PACIENTE"},
         },
+        "planilha_prontuarios": {
+            "caminho": "data/prontuarios.xlsx",
+            "aba": "APAC ",
+            "linha_cabecalho": 3,
+            "colunas": {
+                "PRONTUARIO": "Prontuário",
+                "CLIENTE": "Cliente",
+            },
+        },
         "apac": {
             "titulo_janela": "APAC MAGNETICO",
             "paciente_inicio": "FULANO",
@@ -68,6 +77,7 @@ def _form_ok(**overrides) -> UiFormData:
         sistema_origem="biodata",
         clinica_id="oftalmocentro91",
         planilha_caminho="data/planilha.xlsx",
+        planilha_prontuarios_caminho="data/prontuarios.xlsx",
         paciente_inicio="PACIENTE A",
         dados_fixos=dados,
     )
@@ -76,6 +86,7 @@ def _form_ok(**overrides) -> UiFormData:
             "sistema_origem",
             "clinica_id",
             "planilha_caminho",
+            "planilha_prontuarios_caminho",
             "paciente_inicio",
         ):
             setattr(form, k, v)
@@ -122,6 +133,7 @@ def test_form_from_raw():
     assert form.sistema_origem == "biodata"
     assert form.clinica_id == "oftalmocentro91"
     assert form.planilha_caminho == "data/planilha_exemplo.xlsx"
+    assert form.planilha_prontuarios_caminho == "data/prontuarios.xlsx"
     assert form.paciente_inicio == "FULANO"
     assert form.dados_fixos["cnes_solicitante"] == "111"
 
@@ -141,12 +153,31 @@ def test_merge_preserva_chaves_alheias():
     assert merged["clinica_id"] == "oftalmocentro91"
     assert merged["planilha"]["caminho"] == "data/planilha.xlsx"
     assert merged["planilha"]["aba"] == "Lançamentos"
+    assert merged["planilha_prontuarios"]["caminho"] == "data/prontuarios.xlsx"
+    assert merged["planilha_prontuarios"]["aba"] == "APAC "
+
+
+def test_merge_cria_defaults_planilha_prontuarios():
+    raw = _base_raw()
+    del raw["planilha_prontuarios"]
+    form = _form_ok(planilha_prontuarios_caminho="data/nova_pront.xlsx")
+    merged = merge_form_into_raw(raw, form)
+    assert merged["planilha_prontuarios"]["caminho"] == "data/nova_pront.xlsx"
+    assert merged["planilha_prontuarios"]["aba"] == "APAC "
+    assert merged["planilha_prontuarios"]["linha_cabecalho"] == 3
+    assert merged["planilha_prontuarios"]["colunas"]["PRONTUARIO"] == "Prontuário"
 
 
 def test_merge_normaliza_cns_so_digitos():
     form = _form_ok(medico_solicitante_cns="705.609.469.670.213")
     merged = merge_form_into_raw(_base_raw(), form)
     assert merged["dados_fixos"]["medico_solicitante_cns"] == "705609469670213"
+
+
+def test_validate_planilha_prontuarios_obrigatoria():
+    form = _form_ok(planilha_prontuarios_caminho="")
+    erros = validate_form(form)
+    assert any("prontuários" in e.lower() for e in erros)
 
 
 def test_validate_tipo_apac():
@@ -172,6 +203,7 @@ def test_save_form_roundtrip(tmp_path: Path):
     assert loaded["dados_fixos"]["medico_solicitante_cns"] == "705609469670213"
     assert loaded["biodata"]["locators"] == {"x": 1}
     assert loaded["dados_fixos"]["extra_nao_ui"] == "manter"
+    assert loaded["planilha_prontuarios"]["caminho"] == "data/prontuarios.xlsx"
 
 
 def test_save_form_bloqueia_invalido(tmp_path: Path):

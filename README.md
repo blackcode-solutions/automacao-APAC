@@ -44,7 +44,12 @@ Copy-Item config.example.json config.json
 .\.venv\Scripts\python.exe -m apac_bot make-example
 ```
 
-A planilha real fica na pasta `data/` (ou em outro caminho do PC). No `config.json`, informe esse caminho em `planilha.caminho`. Não é preciso “anexar” arquivo: a automação lê o `.xlsx` do disco. Se o cabeçalho não estiver na linha 1, use `planilha.linha_cabecalho`.
+São **duas planilhas** no disco (a UI permite escolher os caminhos):
+
+1. **Lançamentos** — `planilha.caminho` (PACIENTE, COD, NUMERAÇÃO, etc.)
+2. **Prontuários** — `planilha_prontuarios.caminho` (Cliente → Prontuário; obrigatória com `sistema_origem=biodata` para buscar o paciente)
+
+Não é preciso “anexar” arquivo no sentido de upload: a automação lê os `.xlsx` do caminho informado. Se o cabeçalho da planilha de lançamentos não estiver na linha 1, use `planilha.linha_cabecalho`. Aba/colunas da planilha de prontuários ficam no `config.json` (padrão: aba `APAC `, cabeçalho na linha 3).
 
 Com `planilha.apenas_ativos: true` (padrão), o bot processa **só as linhas visíveis** no Excel — ou seja, as que o filtro da planilha deixa ativas. Linhas ocultas pelo AutoFilter são ignoradas. Para ler a planilha inteira, use `"apenas_ativos": false`.
 
@@ -55,7 +60,7 @@ Copy-Item secrets.example.json secrets.local.json
 # edite usuario e senha nesse arquivo
 ```
 
-Com `secrets.local.json` preenchido, o login no BIODATA é **automático** (`open-biodata`, `fetch`, `run`). Sem o arquivo, o login continua manual.
+Com `secrets.local.json` preenchido, a consulta BIODATA no **modo API** autentica sozinha (`fetch`, `run`). No **modo browser**, o mesmo arquivo automatiza o login no Chromium (`open-biodata`); sem o arquivo, o login web continua manual.
 
 Edite `config.json`:
 
@@ -63,10 +68,17 @@ Edite `config.json`:
 |--------|-----|
 | `clinica_id` | Identificador da clínica no progresso |
 | `sistema_origem` | `mock` (padrão) ou `biodata` |
-| `planilha.*` | Caminho, aba, `linha_cabecalho`, `apenas_ativos` e mapeamento de colunas |
+| `planilha.*` | Caminho, aba, `linha_cabecalho`, `apenas_ativos` e mapeamento de colunas (lançamentos) |
+| `planilha_prontuarios.*` | Caminho da planilha Cliente/Prontuário (obrigatório com BIODATA); aba/colunas no JSON |
 | `normalizacao` | Hífen→barra na numeração; zeros no código (só se configurado) |
 | `dados_fixos` | Por clínica / stub da UI: `cnes_*`, `tipo_apac`; procedimentos: `codigo_procedimento` e `cns_executante` (**dinâmicos** na UI futura), `cbo` (fixo), `quantidade_procedimento` (sempre `1`) |
-| `biodata.locators` | Seletores Playwright — `null` bloqueia consulta real |
+| `biodata.modo` | `api` (HTTP, sem Chromium) ou `browser` (Playwright). Se omitido: `api` quando houver `biodata.api.base_url`, senão `browser` |
+| `biodata.api.base_url` | Base REST (ex.: `https://apis.biodataweb.net/oftalmocentro91/biodata`) |
+| `biodata.api.id_sac` | `idSAC` da clínica na API |
+| `biodata.api.param_nome` | Query de busca por nome (padrão `strCliente`) |
+| `biodata.api.paginacao_nome` | Paginação da busca por nome (padrão `0,20`) |
+| `biodata.api.authorization_prefix` | Prefixo do header `Authorization` (padrão `Bearer`; vazio = token puro) |
+| `biodata.locators` | Seletores Playwright — só obrigatórios no modo `browser` |
 | `apac.usar_navegacao_inicial` | Menu → 2 Enter até a lista (uma vez por sessão) |
 | `apac.usar_conhost` | `true` (padrão) = abre o APAC no console clássico para ler o buffer da tela |
 | `apac.reiniciar_se_ja_aberto` | `true` (padrão) = no `open-apac`/`dump-apac-screen`, encerra APAC já aberto e reabre limpo no MENU |
@@ -83,7 +95,7 @@ A automação lê o **buffer do console** (não só clipboard) para saber a tela
 
 Na tela **PROCEDIMENTOS**, o `open-apac` preenche até Classificação e para antes do CID: código/CNS vêm de `dados_fixos` (dinâmicos na UI futura; se `codigo_procedimento` estiver vazio, usa o COD da planilha); CBO e quantidade são fixos; Equipe fica vazia (Tab); Serviço/Classif. só Tab sem sobrescrever.
 
-Não coloque senhas no JSON. O login no BIODATA é manual, em perfil de navegador dedicado (`browser_profile/`).
+Não coloque senhas no JSON. Credenciais ficam em `secrets.local.json`. No modo `api`, a senha é convertida para maiúsculas e enviada como SHA-512 na autenticação; o token (~4h) vai no header `Authorization`. O comando `open-biodata` continua abrindo o Chromium (útil para mapeamento / modo `browser`).
 
 ## 3. Comandos
 
@@ -129,14 +141,25 @@ Flags úteis: `--config`, `--planilha`, `--limit`, `--dry-run` (padrão em `run`
 2. Config + planilha fictícia + `validate`  
 3. `sistema_origem=mock` + `run --dry-run`  
 4. Progresso / retomada / falhas (já coberto pelos testes)  
-5. Mapear BIODATA → preencher locators → `fetch` real  
-6. Testar teclas no APAC **sem salvar** (`permitir_salvar=false`)  
-7. Um lançamento supervisionado  
-8. Lote pequeno  
+5. Configurar `biodata.modo=api` + `biodata.api.*` + `secrets.local.json` → `fetch` real (sem abrir navegador)  
+6. (Opcional) Modo `browser` / locators Playwright se precisar do Chromium  
+7. Testar teclas no APAC **sem salvar** (`permitir_salvar=false`)  
+8. Um lançamento supervisionado  
+9. Lote pequeno  
 
-## 5. Fluxo BIODATA mapeado (Oftalmocentro)
+## 5. Fluxo BIODATA via API (recomendado)
 
-Após o login automático (a rota pós-login depende do usuário: `/home`, `/consultorio/...`, etc.) o bot **não força** `/home`: usa o menu lateral na rota em que caiu.
+1. Em `config.json`: `sistema_origem=biodata`, `biodata.modo=api`, `biodata.api.base_url` e `biodata.api.id_sac`  
+2. Preencher `secrets.local.json` (`usuario` / `senha` em texto — o bot faz `SHA-512(senha.upper())`)  
+3. Rodar `fetch` ou `run` — consulta `autenticar` + `clientes/listar` por prontuário (`clienteId`) ou nome  
+
+```powershell
+.\.venv\Scripts\python.exe -m apac_bot fetch --config config.json --limit 1
+```
+
+## 5a. Fluxo BIODATA mapeado no browser (Oftalmocentro)
+
+Com `biodata.modo=browser`, após o login automático (a rota pós-login depende do usuário: `/home`, `/consultorio/...`, etc.) o bot **não força** `/home`: usa o menu lateral na rota em que caiu.
 
 1. Clica no módulo **Atendimento** do menu lateral  
 2. Em **Pesquisar tela...**, digita `cadastro de paciente`  
@@ -264,4 +287,4 @@ config.example.json
 tests/
 ```
 
-A UI grava só os campos dinâmicos / planilha / `paciente_inicio` no `config.json` (merge seguro: não apaga `biodata`, timeouts etc.). Credenciais continuam em `secrets.local.json`.
+A UI grava os campos dinâmicos, as duas planilhas (`planilha.caminho` e `planilha_prontuarios.caminho`) e `paciente_inicio` no `config.json` (merge seguro: não apaga `biodata`, timeouts etc.) ao clicar em **Iniciar**. Ações na tela: iniciar, cancelar e exportar o `.SET`. Validar/status ficam no CLI. Credenciais continuam em `secrets.local.json`.
