@@ -1,9 +1,11 @@
 """Testes do merge planilha + progresso para o painel de lote."""
 
+import json
 from pathlib import Path
 
 from apac_bot.models import EstadoLancamento, Lancamento
 from apac_bot.progress import ProgressRecord
+from apac_bot.sheet import create_example_workbook
 from apac_bot.ui.lote_data import (
     contar_por_estado,
     export_lote_csv,
@@ -14,6 +16,16 @@ from apac_bot.ui.lote_data import (
     merge_lote_rows,
     status_label,
 )
+
+
+def _cfg_json_for_lote(tmp_path: Path, *, paciente_inicio: str = "") -> Path:
+    example = json.loads(Path("config.example.json").read_text(encoding="utf-8"))
+    example["planilha"]["caminho"] = str(tmp_path / "planilha_vazia_ou_outra.xlsx")
+    example.setdefault("apac", {})["paciente_inicio"] = paciente_inicio
+    example.setdefault("progresso", {})["caminho_db"] = str(tmp_path / "progress.db")
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(example), encoding="utf-8")
+    return cfg_path
 
 
 def _lanc(
@@ -166,3 +178,38 @@ def test_filtrar_linhas_lote_por_nome_status_e_query_vazia():
     por_apac = filtrar_linhas_lote(rows, "222")
     assert len(por_apac) == 1
     assert por_apac[0].numero_apac == "222"
+
+
+def test_load_snapshot_com_planilha_override_ignora_caminho_do_config(
+    tmp_path: Path,
+):
+    override = tmp_path / "anexada.xlsx"
+    create_example_workbook(override)
+    cfg_path = _cfg_json_for_lote(tmp_path, paciente_inicio="")
+
+    snap_sem = load_lote_snapshot(cfg_path)
+    assert snap_sem.total == 0
+    assert snap_sem.erro is not None
+
+    snap = load_lote_snapshot(cfg_path, planilha_override=override)
+    assert snap.erro is None
+    assert snap.total > 0
+    assert len(snap.rows) == snap.total
+    assert snap.rows[0].nome == "MARIA SILVA FICTICIA"
+
+
+def test_load_snapshot_paciente_inicio_vazio_carrega_preview(
+    tmp_path: Path,
+):
+    xlsx = tmp_path / "planilha.xlsx"
+    create_example_workbook(xlsx)
+    cfg_path = _cfg_json_for_lote(tmp_path, paciente_inicio="")
+    raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    raw["planilha"]["caminho"] = str(xlsx)
+    cfg_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    snap = load_lote_snapshot(cfg_path)
+    assert snap.erro is None
+    assert snap.total > 0
+    assert all(r.nome for r in snap.rows)
+    assert "paciente_inicio" not in (snap.erro or "").lower()

@@ -13,28 +13,32 @@ from typing import Optional
 import customtkinter as ctk
 from PIL import Image
 
+from apac_bot.sheet import SheetError, listar_abas_faturamento_glaucoma
+from apac_bot.ui import theme
 from apac_bot.ui.config_io import (
     CLINICAS_POR_SISTEMA,
     CNES_UI_KEYS,
     DADOS_FIXOS_LABELS,
     DADOS_FIXOS_UI_KEYS,
-    ORGAO_EMISS_TIPOS,
+    MODALIDADE_GLAUCOMA,
+    MODALIDADE_PADRAO,
+    MODALIDADES_UI,
     SISTEMAS_UI,
-    UI_SECOES_TELA,
     ConfigIoError,
     UiFormData,
     aplicar_defaults_clinica,
-    codigo_orgao_emiss,
     default_config_path,
     load_form,
+    modalidade_ui_label,
+    normalizar_modalidade,
     normalizar_sistema_origem,
     save_form,
+    save_modalidade,
     secrets_missing,
+    secoes_para_modalidade,
     sistema_ui_label,
-    tipo_orgao_emiss,
     validate_form,
 )
-from apac_bot.ui import theme
 from apac_bot.ui.lote_data import (
     LoteSnapshot,
     linhas_com_problema,
@@ -122,6 +126,10 @@ class ApacBotApp(ctk.CTk):
         self._resize_after_id: Optional[str] = None
         self._last_bg_size: tuple[int, int] = (0, 0)
         self._main_ready = False
+        self._modalidade = MODALIDADE_PADRAO
+        self._dados_fixos_cache: dict[str, str] = {}
+        self._secoes_host: Optional[ctk.CTkFrame] = None
+        self._body: Optional[ctk.CTkScrollableFrame] = None
 
         self.title(f"{APP_NAME} — {APP_TAGLINE}")
         # Splash fixa 1024x576 (proporção da arte welcome — evita logo achatada)
@@ -143,6 +151,8 @@ class ApacBotApp(ctk.CTk):
             self._resize_after_id = None
         self.unbind("<Configure>")
         self._lote_panel = None
+        self._secoes_host = None
+        self._body = None
         win = self._historico_win
         if win is not None and win.is_open:
             try:
@@ -394,9 +404,11 @@ class ApacBotApp(ctk.CTk):
         )
         header.grid(row=0, column=0, sticky="new")
         header.grid_columnconfigure(0, weight=1)
+        header.grid_columnconfigure(1, weight=0)
+        header.grid_columnconfigure(2, weight=0)
         accent_bar = ctk.CTkFrame(header, fg_color=theme.BRAND_ACCENT, height=3)
         accent_bar.grid_propagate(False)
-        accent_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        accent_bar.grid(row=0, column=0, columnspan=3, sticky="ew")
         title_wrap = ctk.CTkFrame(header, fg_color="transparent")
         title_wrap.grid(row=1, column=0, sticky="ew", padx=16, pady=(8, 4))
         title_wrap.grid_columnconfigure(0, weight=1)
@@ -414,12 +426,27 @@ class ApacBotApp(ctk.CTk):
             text_color=theme.BRAND_MUTED,
             anchor="w",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+        mod_wrap = ctk.CTkFrame(header, fg_color="transparent")
+        mod_wrap.grid(row=1, column=1, sticky="e", padx=(0, 10), pady=(8, 4))
+        theme.style_field_label(mod_wrap, "Modelo de APAC").grid(
+            row=0, column=0, sticky="w", padx=0, pady=(0, 2)
+        )
+        self.opt_modalidade = theme.style_option(
+            mod_wrap,
+            values=list(MODALIDADES_UI),
+            width=160,
+            command=self._on_modalidade_changed,
+        )
+        self.opt_modalidade.grid(row=1, column=0, sticky="w", padx=0, pady=0)
+        self.opt_modalidade.set(modalidade_ui_label(self._modalidade))
+
         theme.btn_secondary(
             header,
             "Recarregar",
             command=self._load_into_form,
             width=110,
-        ).grid(row=1, column=1, padx=(0, 16), pady=(8, 4))
+        ).grid(row=1, column=2, padx=(0, 16), pady=(8, 4))
 
         body = ctk.CTkScrollableFrame(
             self,
@@ -429,28 +456,22 @@ class ApacBotApp(ctk.CTk):
         )
         body.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
         body.grid_columnconfigure(0, weight=1)
+        self._body = body
 
-        row = 0
         card_clinica, r = self._section_card(
             body,
-            row,
+            0,
             "Clínica / planilha",
             pady=(10, 8),
             title_pady=(8, 6),
         )
-        row += 1
         r = self._add_sistema_clinica_planilha_row(card_clinica, r)
-        r = self._add_fields_grid(card_clinica, r, ("paciente_inicio",))
+        self._add_fields_grid(card_clinica, r, ("paciente_inicio",))
 
-        for titulo, keys in UI_SECOES_TELA:
-            card, r = self._section_card(body, row, titulo)
-            row += 1
-            n_cols = 5 if titulo == "Procedimentos" else 3
-            r = self._add_fields_grid(card, r, keys, cols=n_cols)
-            if titulo == "Solicitação / Autorização":
-                r = self._add_solicitacao_autorizador_orgao_row(card, r)
-
-        self._apply_cnes_for_clinica(self.opt_clinica.get())
+        self._secoes_host = ctk.CTkFrame(body, fg_color="transparent")
+        self._secoes_host.grid(row=1, column=0, sticky="ew")
+        self._secoes_host.grid_columnconfigure(0, weight=1)
+        self._rebuild_dados_fixos_sections()
 
         self.lbl_aviso = ctk.CTkLabel(
             body,
@@ -461,11 +482,10 @@ class ApacBotApp(ctk.CTk):
             justify="left",
             anchor="w",
         )
-        self.lbl_aviso.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 6))
-        row += 1
+        self.lbl_aviso.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 6))
 
         actions = theme.make_card(body)
-        actions.grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 10))
+        actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
         actions.grid_columnconfigure(0, weight=1)
         inner_actions = ctk.CTkFrame(actions, fg_color="transparent")
         inner_actions.grid(
@@ -492,6 +512,7 @@ class ApacBotApp(ctk.CTk):
             inner_actions, "Exportar SET", command=self._export_set
         )
         self.btn_export_set.grid(row=0, column=2, padx=(6, 0), pady=0, sticky="ew")
+        self._sync_action_buttons_for_modalidade()
 
         # Fora do body scrollável — evita CTkScrollableFrame aninhado (ghosting no Windows).
         self._lote_panel = LotePanel(
@@ -502,6 +523,83 @@ class ApacBotApp(ctk.CTk):
         self._lote_panel.grid(
             row=2, column=0, sticky="ew", padx=12, pady=(8, 12)
         )
+
+    def _on_modalidade_changed(self, choice: str) -> None:
+        nova = normalizar_modalidade(choice)
+        if nova == self._modalidade:
+            return
+        self._modalidade = nova
+        self._rebuild_planilha_anexos()
+        self._rebuild_dados_fixos_sections()
+        try:
+            save_modalidade(self._resolve_config_path(), nova)
+            self._append_log(
+                f"[UI] Modalidade: {modalidade_ui_label(nova)}\n"
+            )
+        except ConfigIoError as exc:
+            self._append_log(f"[UI] Não foi possível salvar modalidade: {exc}\n")
+
+    def _cache_dados_fixos_from_entries(self) -> None:
+        for key in DADOS_FIXOS_UI_KEYS:
+            entry = self._entries.get(key)
+            if entry is None:
+                continue
+            try:
+                self._dados_fixos_cache[key] = entry.get().strip()
+            except Exception:
+                # widget já destruído no rebuild
+                pass
+
+    def _clear_dados_fixos_widgets(self) -> None:
+        for key in DADOS_FIXOS_UI_KEYS:
+            self._entries.pop(key, None)
+
+    def _apply_dados_fixos_cache(self) -> None:
+        for key, valor in self._dados_fixos_cache.items():
+            entry = self._entries.get(key)
+            if entry is None:
+                continue
+            entry.delete(0, "end")
+            entry.insert(0, valor)
+
+    def _rebuild_dados_fixos_sections(
+        self, *, seed: Optional[dict[str, str]] = None
+    ) -> None:
+        host = self._secoes_host
+        if host is None:
+            return
+        if seed is not None:
+            self._dados_fixos_cache.update(seed)
+        else:
+            self._cache_dados_fixos_from_entries()
+
+        for child in host.winfo_children():
+            child.destroy()
+        self._clear_dados_fixos_widgets()
+
+        row = 0
+        for titulo, keys in secoes_para_modalidade(self._modalidade):
+            card, r = self._section_card(host, row, titulo)
+            row += 1
+            r = self._add_fields_grid(card, r, keys, cols=3)
+            if titulo == "Solicitação / Autorização":
+                self._add_solicitacao_autorizador_orgao_row(card, r)
+        self._apply_dados_fixos_cache()
+        clinica = getattr(self, "opt_clinica", None)
+        if clinica is not None:
+            self._apply_cnes_for_clinica(clinica.get())
+
+        self._sync_action_buttons_for_modalidade()
+
+    def _sync_action_buttons_for_modalidade(self) -> None:
+        if self._job_running:
+            return
+        btn_iniciar = getattr(self, "btn_open_apac", None)
+        btn_export = getattr(self, "btn_export_set", None)
+        if btn_iniciar is None or btn_export is None:
+            return
+        btn_iniciar.configure(state="normal")
+        btn_export.configure(state="normal")
 
     def _add_fields_grid(
         self,
@@ -528,31 +626,20 @@ class ApacBotApp(ctk.CTk):
                 theme.style_field_label(cell, labels.get(key, key)).grid(
                     row=0, column=0, sticky="w", padx=0, pady=(0, 2)
                 )
-                if key == "tipo_apac":
-                    self.opt_tipo_apac = theme.style_option(
-                        cell, values=["1", "3"], width=80
-                    )
-                    self.opt_tipo_apac.grid(
-                        row=1, column=0, sticky="w", padx=0, pady=0
-                    )
-                    self.opt_tipo_apac.set("3")
-                else:
-                    entry = theme.style_entry(cell)
-                    entry.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
-                    self._entries[key] = entry
+                entry = theme.style_entry(cell)
+                entry.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+                self._entries[key] = entry
             row += 1
         return row
 
     def _add_solicitacao_autorizador_orgao_row(
         self, parent: ctk.CTkFrame, row: int
     ) -> int:
-        """CNS autorizador | Nome | Órgão emissor | Código emissor (readonly)."""
+        """CNS autorizador | Nome (órgão/código fixos por modalidade, fora da UI)."""
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
         wrap.grid(row=row, column=0, sticky="ew", padx=0, pady=4)
         wrap.grid_columnconfigure(0, weight=0)
         wrap.grid_columnconfigure(1, weight=1)
-        wrap.grid_columnconfigure(2, weight=0)
-        wrap.grid_columnconfigure(3, weight=0)
 
         col_cns = ctk.CTkFrame(wrap, fg_color="transparent")
         col_cns.grid(row=0, column=0, sticky="nw", padx=(0, 8), pady=0)
@@ -564,7 +651,7 @@ class ApacBotApp(ctk.CTk):
         self._entries["autorizador_cns"] = entry_cns
 
         col_nome = ctk.CTkFrame(wrap, fg_color="transparent")
-        col_nome.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=0)
+        col_nome.grid(row=0, column=1, sticky="ew", padx=0, pady=0)
         col_nome.grid_columnconfigure(0, weight=1)
         theme.style_field_label(
             col_nome, DADOS_FIXOS_LABELS["autorizador_nome"]
@@ -572,55 +659,17 @@ class ApacBotApp(ctk.CTk):
         entry_nome = theme.style_entry(col_nome)
         entry_nome.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
         self._entries["autorizador_nome"] = entry_nome
-
-        col_tipo = ctk.CTkFrame(wrap, fg_color="transparent")
-        col_tipo.grid(row=0, column=2, sticky="nw", padx=(0, 8), pady=0)
-        theme.style_field_label(
-            col_tipo, DADOS_FIXOS_LABELS["orgao_emiss_tipo"]
-        ).grid(row=0, column=0, sticky="w", padx=0, pady=(0, 2))
-        self.opt_orgao_emiss = theme.style_option(
-            col_tipo,
-            values=list(ORGAO_EMISS_TIPOS),
-            width=120,
-            command=self._on_orgao_emiss_changed,
-        )
-        self.opt_orgao_emiss.grid(row=1, column=0, sticky="w", padx=0, pady=0)
-        self.opt_orgao_emiss.set("Municipal")
-
-        col_cod = ctk.CTkFrame(wrap, fg_color="transparent")
-        col_cod.grid(row=0, column=3, sticky="nw", padx=0, pady=0)
-        theme.style_field_label(
-            col_cod, DADOS_FIXOS_LABELS["cod_orgao_emiss"]
-        ).grid(row=0, column=0, sticky="w", padx=0, pady=(0, 2))
-        entry_cod = theme.style_entry(col_cod, width=120)
-        entry_cod.grid(row=1, column=0, sticky="w", padx=0, pady=0)
-        self._entries["cod_orgao_emiss"] = entry_cod
-        self._sync_orgao_emiss_codigo("Municipal")
         return row + 1
-
-    def _sync_orgao_emiss_codigo(self, tipo: str) -> None:
-        entry = self._entries.get("cod_orgao_emiss")
-        if entry is None:
-            return
-        codigo = codigo_orgao_emiss(tipo)
-        entry.configure(state="normal")
-        entry.delete(0, "end")
-        entry.insert(0, codigo)
-        entry.configure(state="disabled")
-
-    def _on_orgao_emiss_changed(self, choice: str) -> None:
-        self._sync_orgao_emiss_codigo(choice)
 
     def _add_sistema_clinica_planilha_row(
         self, parent: ctk.CTkFrame, row: int
     ) -> int:
-        """Sistema | Clínica | Planilha | Planilha prontuários."""
+        """Sistema | Clínica | anexos de planilha (1 no Glaucoma, 2 no Padrão)."""
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
         wrap.grid(row=row, column=0, sticky="ew", padx=0, pady=4)
         wrap.grid_columnconfigure(0, weight=0)
         wrap.grid_columnconfigure(1, weight=0)
         wrap.grid_columnconfigure(2, weight=1)
-        wrap.grid_columnconfigure(3, weight=1)
 
         col_sistema = ctk.CTkFrame(wrap, fg_color="transparent")
         col_sistema.grid(row=0, column=0, sticky="nw", padx=(0, 10), pady=0)
@@ -649,37 +698,191 @@ class ApacBotApp(ctk.CTk):
         )
         self.opt_clinica.grid(row=1, column=0, sticky="w", padx=0, pady=0)
 
-        col_planilha = ctk.CTkFrame(wrap, fg_color="transparent")
-        col_planilha.grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=0)
-        col_planilha.grid_columnconfigure(0, weight=1)
-        theme.style_field_label(col_planilha, "Planilha (.xlsx)").grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2)
-        )
-        entry = theme.style_entry(col_planilha)
-        entry.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=0)
-        self._entries["planilha_caminho"] = entry
-        theme.btn_secondary(
-            col_planilha, "Browse…", width=90, command=self._browse_planilha
-        ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
-
-        col_pront = ctk.CTkFrame(wrap, fg_color="transparent")
-        col_pront.grid(row=0, column=3, sticky="ew", padx=0, pady=0)
-        col_pront.grid_columnconfigure(0, weight=1)
-        theme.style_field_label(col_pront, "Planilha prontuários (.xlsx)").grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2)
-        )
-        entry_pront = theme.style_entry(col_pront)
-        entry_pront.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=0)
-        self._entries["planilha_prontuarios_caminho"] = entry_pront
-        theme.btn_secondary(
-            col_pront,
-            "Browse…",
-            width=90,
-            command=self._browse_planilha_prontuarios,
-        ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
+        self._planilha_anexos_host = ctk.CTkFrame(wrap, fg_color="transparent")
+        self._planilha_anexos_host.grid(row=0, column=2, sticky="ew", padx=0, pady=0)
+        self._planilha_anexos_host.grid_columnconfigure(0, weight=1)
+        self._planilha_caminho_cache = ""
+        self._planilha_prontuarios_cache = ""
+        self._planilha_aba_glaucoma_cache = ""
+        self._rebuild_planilha_anexos()
 
         self._apply_clinicas_for_sistema("biodata")
         return row + 1
+
+    def _cache_planilha_anexos_from_entries(self) -> None:
+        entry = self._entries.get("planilha_caminho")
+        if entry is not None:
+            try:
+                self._planilha_caminho_cache = entry.get().strip()
+            except Exception:
+                # widget destruído no rebuild
+                pass
+        entry_pront = self._entries.get("planilha_prontuarios_caminho")
+        if entry_pront is not None:
+            try:
+                self._planilha_prontuarios_cache = entry_pront.get().strip()
+            except Exception:
+                # widget destruído no rebuild
+                pass
+        opt_aba = getattr(self, "opt_aba_glaucoma", None)
+        if opt_aba is not None:
+            try:
+                valor = opt_aba.get().strip()
+                if valor and valor != "—":
+                    self._planilha_aba_glaucoma_cache = valor
+            except Exception:
+                # widget destruído no rebuild
+                pass
+
+    def _current_aba_glaucoma(self) -> str:
+        opt = getattr(self, "opt_aba_glaucoma", None)
+        if opt is not None:
+            try:
+                valor = opt.get().strip()
+                if valor and valor != "—":
+                    return valor
+            except Exception:
+                # option menu já destruído
+                pass
+        return getattr(self, "_planilha_aba_glaucoma_cache", "") or ""
+
+    def _populate_abas_glaucoma(
+        self, caminho: str, *, preferida: str = ""
+    ) -> None:
+        opt = getattr(self, "opt_aba_glaucoma", None)
+        if opt is None:
+            return
+        path = Path(caminho) if caminho else None
+        abas: list[str] = []
+        if path is not None and path.is_file():
+            try:
+                abas = listar_abas_faturamento_glaucoma(path)
+            except SheetError as exc:
+                self._append_log(f"[UI] Abas glaucoma: {exc}\n")
+                abas = []
+        if not abas:
+            opt.configure(values=["—"], state="disabled")
+            opt.set("—")
+            self._planilha_aba_glaucoma_cache = ""
+            return
+        opt.configure(values=abas, state="normal")
+        escolhida = (preferida or self._planilha_aba_glaucoma_cache or "").strip()
+        lower = {a.casefold(): a for a in abas}
+        hit = lower.get(escolhida.casefold()) if escolhida else None
+        selecionada = hit or abas[0]
+        opt.set(selecionada)
+        self._planilha_aba_glaucoma_cache = selecionada
+
+    def _on_aba_glaucoma_changed(self, choice: str) -> None:
+        valor = (choice or "").strip()
+        if not valor or valor == "—":
+            return
+        self._planilha_aba_glaucoma_cache = valor
+        caminho = getattr(self, "_planilha_caminho_cache", "") or ""
+        entry = self._entries.get("planilha_caminho")
+        if entry is not None:
+            try:
+                caminho = entry.get().strip() or caminho
+            except Exception:
+                # entry destruído
+                pass
+        override = Path(caminho) if caminho else None
+        self._refresh_lote_panel(
+            planilha_override=override if override and override.is_file() else None,
+            aba_glaucoma_override=valor,
+        )
+
+    def _rebuild_planilha_anexos(self) -> None:
+        host = getattr(self, "_planilha_anexos_host", None)
+        if host is None:
+            return
+        self._cache_planilha_anexos_from_entries()
+        for child in host.winfo_children():
+            child.destroy()
+        self._entries.pop("planilha_caminho", None)
+        self._entries.pop("planilha_prontuarios_caminho", None)
+        if hasattr(self, "opt_aba_glaucoma"):
+            del self.opt_aba_glaucoma
+
+        glaucoma = self._modalidade == MODALIDADE_GLAUCOMA
+        if glaucoma:
+            host.grid_columnconfigure(0, weight=1)
+            host.grid_columnconfigure(1, weight=1)
+            col_planilha = ctk.CTkFrame(host, fg_color="transparent")
+            col_planilha.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=0)
+            col_planilha.grid_columnconfigure(0, weight=1)
+            theme.style_field_label(col_planilha, "Planilha glaucoma (.xlsx)").grid(
+                row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2)
+            )
+            entry = theme.style_entry(col_planilha)
+            entry.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=0)
+            self._entries["planilha_caminho"] = entry
+            theme.btn_secondary(
+                col_planilha, "Browse…", width=90, command=self._browse_planilha
+            ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
+
+            col_aba = ctk.CTkFrame(host, fg_color="transparent")
+            col_aba.grid(row=0, column=1, sticky="ew", padx=0, pady=0)
+            col_aba.grid_columnconfigure(0, weight=1)
+            theme.style_field_label(col_aba, "Aba").grid(
+                row=0, column=0, sticky="w", padx=0, pady=(0, 2)
+            )
+            self.opt_aba_glaucoma = theme.style_option(
+                col_aba,
+                values=["—"],
+                width=260,
+                command=self._on_aba_glaucoma_changed,
+            )
+            self.opt_aba_glaucoma.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+            self.opt_aba_glaucoma.set("—")
+            self.opt_aba_glaucoma.configure(state="disabled")
+        else:
+            host.grid_columnconfigure(0, weight=1)
+            host.grid_columnconfigure(1, weight=1)
+            col_planilha = ctk.CTkFrame(host, fg_color="transparent")
+            col_planilha.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=0)
+            col_planilha.grid_columnconfigure(0, weight=1)
+            theme.style_field_label(col_planilha, "Planilha (.xlsx)").grid(
+                row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2)
+            )
+            entry = theme.style_entry(col_planilha)
+            entry.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=0)
+            self._entries["planilha_caminho"] = entry
+            theme.btn_secondary(
+                col_planilha, "Browse…", width=90, command=self._browse_planilha
+            ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
+
+            col_pront = ctk.CTkFrame(host, fg_color="transparent")
+            col_pront.grid(row=0, column=1, sticky="ew", padx=0, pady=0)
+            col_pront.grid_columnconfigure(0, weight=1)
+            theme.style_field_label(
+                col_pront, "Planilha prontuários (.xlsx)"
+            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2))
+            entry_pront = theme.style_entry(col_pront)
+            entry_pront.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=0)
+            self._entries["planilha_prontuarios_caminho"] = entry_pront
+            theme.btn_secondary(
+                col_pront,
+                "Browse…",
+                width=90,
+                command=self._browse_planilha_prontuarios,
+            ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
+
+        caminho = getattr(self, "_planilha_caminho_cache", "") or ""
+        if caminho:
+            entry = self._entries["planilha_caminho"]
+            entry.delete(0, "end")
+            entry.insert(0, caminho)
+        pront = getattr(self, "_planilha_prontuarios_cache", "") or ""
+        entry_pront = self._entries.get("planilha_prontuarios_caminho")
+        if entry_pront is not None and pront:
+            entry_pront.delete(0, "end")
+            entry_pront.insert(0, pront)
+        if glaucoma:
+            self._populate_abas_glaucoma(
+                caminho,
+                preferida=getattr(self, "_planilha_aba_glaucoma_cache", "") or "",
+            )
 
     def _apply_clinicas_for_sistema(self, sistema: str) -> None:
         key = normalizar_sistema_origem(sistema)
@@ -754,11 +957,23 @@ class ApacBotApp(ctk.CTk):
         self._relatorio_win = win
         win.present()
 
-    def _refresh_lote_panel(self) -> Optional[LoteSnapshot]:
+    def _refresh_lote_panel(
+        self,
+        *,
+        planilha_override: Optional[Path] = None,
+        aba_glaucoma_override: Optional[str] = None,
+    ) -> Optional[LoteSnapshot]:
         panel = self._lote_panel
         if panel is None:
             return None
-        snap = load_lote_snapshot(self._resolve_config_path())
+        aba = aba_glaucoma_override
+        if aba is None and self._modalidade == MODALIDADE_GLAUCOMA:
+            aba = self._current_aba_glaucoma() or None
+        snap = load_lote_snapshot(
+            self._resolve_config_path(),
+            planilha_override=planilha_override,
+            aba_glaucoma_override=aba,
+        )
         panel.apply_snapshot(snap)
         return snap
 
@@ -786,31 +1001,41 @@ class ApacBotApp(ctk.CTk):
         return Path(self.config_path)
 
     def _collect_form(self) -> UiFormData:
-        dados = {
-            key: self._entries[key].get().strip()
-            for key in DADOS_FIXOS_UI_KEYS
-            if key in self._entries
-        }
-        dados["tipo_apac"] = self.opt_tipo_apac.get().strip()
-        dados["cod_orgao_emiss"] = codigo_orgao_emiss(self.opt_orgao_emiss.get())
+        self._cache_dados_fixos_from_entries()
+        dados = dict(self._dados_fixos_cache)
+        for key in DADOS_FIXOS_UI_KEYS:
+            if key in self._entries:
+                dados[key] = self._entries[key].get().strip()
         sistema = normalizar_sistema_origem(self.opt_sistema.get())
         clinica = self.opt_clinica.get().strip()
         if clinica == "—":
             clinica = ""
+        entry_planilha = self._entries.get("planilha_caminho")
+        planilha = entry_planilha.get().strip() if entry_planilha is not None else ""
+        entry_pront = self._entries.get("planilha_prontuarios_caminho")
+        if entry_pront is not None:
+            prontuarios = entry_pront.get().strip()
+        else:
+            prontuarios = getattr(self, "_planilha_prontuarios_cache", "") or ""
         return UiFormData(
             sistema_origem=sistema,
             clinica_id=clinica,
-            planilha_caminho=self._entries["planilha_caminho"].get().strip(),
-            planilha_prontuarios_caminho=self._entries[
-                "planilha_prontuarios_caminho"
-            ]
-            .get()
-            .strip(),
+            planilha_caminho=planilha,
+            planilha_prontuarios_caminho=prontuarios,
+            planilha_aba_glaucoma=self._current_aba_glaucoma(),
             paciente_inicio=self._entries["paciente_inicio"].get().strip(),
+            modalidade=self._modalidade,
             dados_fixos=dados,
         )
 
     def _fill_form(self, form: UiFormData) -> None:
+        self._modalidade = normalizar_modalidade(form.modalidade)
+        self.opt_modalidade.set(modalidade_ui_label(self._modalidade))
+        self._planilha_caminho_cache = form.planilha_caminho
+        self._planilha_prontuarios_cache = form.planilha_prontuarios_caminho
+        self._planilha_aba_glaucoma_cache = form.planilha_aba_glaucoma
+        self._rebuild_planilha_anexos()
+
         label = sistema_ui_label(form.sistema_origem)
         self.opt_sistema.set(label)
         self._apply_clinicas_for_sistema(form.sistema_origem)
@@ -827,31 +1052,12 @@ class ApacBotApp(ctk.CTk):
             ):
                 self.opt_clinica.configure(state="disabled")
 
-        mapping = {
-            "planilha_caminho": form.planilha_caminho,
-            "planilha_prontuarios_caminho": form.planilha_prontuarios_caminho,
-            "paciente_inicio": form.paciente_inicio,
-            **form.dados_fixos_completos(),
-        }
-        for key, valor in mapping.items():
-            if key in {"tipo_apac", "cod_orgao_emiss"}:
-                continue
-            entry = self._entries.get(key)
-            if entry is None:
-                continue
-            entry.delete(0, "end")
-            entry.insert(0, valor)
+        entry_pi = self._entries.get("paciente_inicio")
+        if entry_pi is not None:
+            entry_pi.delete(0, "end")
+            entry_pi.insert(0, form.paciente_inicio)
 
-        tipo = str(form.dados_fixos.get("tipo_apac") or "").strip()
-        self.opt_tipo_apac.set(tipo if tipo in {"1", "3"} else "3")
-
-        orgao_tipo = tipo_orgao_emiss(
-            str(form.dados_fixos.get("cod_orgao_emiss") or "")
-        )
-        self.opt_orgao_emiss.set(orgao_tipo)
-        self._sync_orgao_emiss_codigo(orgao_tipo)
-
-        self._apply_cnes_for_clinica(self.opt_clinica.get())
+        self._rebuild_dados_fixos_sections(seed=form.dados_fixos_completos())
 
     def _load_into_form(self) -> None:
         path = self._resolve_config_path()
@@ -881,9 +1087,26 @@ class ApacBotApp(ctk.CTk):
         )
         if not path:
             return
-        entry = self._entries["planilha_caminho"]
-        entry.delete(0, "end")
-        entry.insert(0, path)
+        entry = self._entries.get("planilha_caminho")
+        if entry is None:
+            self._planilha_caminho_cache = path
+        else:
+            entry.delete(0, "end")
+            entry.insert(0, path)
+            self._planilha_caminho_cache = path
+        if self._modalidade == MODALIDADE_GLAUCOMA:
+            self._populate_abas_glaucoma(
+                path,
+                preferida=self._planilha_aba_glaucoma_cache,
+            )
+        self._refresh_lote_panel(
+            planilha_override=Path(path),
+            aba_glaucoma_override=(
+                self._current_aba_glaucoma() or None
+                if self._modalidade == MODALIDADE_GLAUCOMA
+                else None
+            ),
+        )
 
     def _browse_planilha_prontuarios(self) -> None:
         path = filedialog.askopenfilename(
@@ -892,20 +1115,24 @@ class ApacBotApp(ctk.CTk):
         )
         if not path:
             return
-        entry = self._entries["planilha_prontuarios_caminho"]
+        entry = self._entries.get("planilha_prontuarios_caminho")
+        if entry is None:
+            self._planilha_prontuarios_cache = path
+            return
         entry.delete(0, "end")
         entry.insert(0, path)
+        self._planilha_prontuarios_cache = path
 
     def _set_job_running(self, running: bool) -> None:
         self._job_running = running
-        state = "disabled" if running else "normal"
-        for btn in (self.btn_open_apac, self.btn_export_set):
-            btn.configure(state=state)
         self.btn_cancel.configure(state="normal" if running else "disabled")
         if running:
+            for btn in (self.btn_open_apac, self.btn_export_set):
+                btn.configure(state="disabled")
             self._refresh_lote_panel()
             self._schedule_lote_poll()
         else:
+            self._sync_action_buttons_for_modalidade()
             self._stop_lote_poll()
             snap = self._refresh_lote_panel()
             if snap is not None and linhas_com_problema(snap.rows):
@@ -930,9 +1157,15 @@ class ApacBotApp(ctk.CTk):
                 "Execute «Iniciar» antes de exportar.",
             )
             return
-        comp = str(cfg.export_set.get("competencia_padrao") or "202609")
-        prefixo = str(cfg.export_set.get("prefixo_arquivo") or "APOFTAL")
-        default_name = nome_arquivo_set(comp, prefixo)
+        # Cabecalho INTERNO: "01" + "#APAC" + AAAAMM (pos 7..13)
+        try:
+            header = staging.read_bytes().split(b"\r\n", 1)[0].decode("latin-1")
+            comp = header[7:13] if len(header) >= 13 and header[7:13].isdigit() else ""
+        except OSError:
+            comp = ""
+        if not comp:
+            comp = str(cfg.export_set.get("competencia_padrao") or "202609")
+        default_name = nome_arquivo_set(comp, cfg.modalidade)
         destino = filedialog.asksaveasfilename(
             title="Salvar arquivo SET",
             defaultextension=".SET",

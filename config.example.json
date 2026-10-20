@@ -122,13 +122,11 @@
   "export_set": {
     "limite_pacientes": 0,
     "pasta_saida": "data/export_set",
-    "prefixo_arquivo": "APOFTAL",
     "competencia_padrao": "202609",
     "orgao_origem": "CLINICA DE SERVICOS MEDICOS GE",
     "sigla": "CSMG",
     "cgc": "01192155000210",
     "orgao_destino": "SECRETARIA DE SAUDE",
-    "destino_in": "M",
     "versao": "Versao 04.01"
   },
   "apac": {
@@ -149,6 +147,7 @@
     "confirmar_navegacao_inicial": false,
     "velocidade": "rapido",
     "intervalo_enter_navegacao_s": 0.8,
+    "modalidade": "padrao",
     "paciente_inicio": "SANDRA MARIA PEREIRA SILVA",
     "passos": []
   },

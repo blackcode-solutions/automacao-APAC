@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import calendar
 import ctypes
 import os
 import re
@@ -13,7 +12,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from apac_bot.config import AppConfig, config_dir, resolve_path
+from apac_bot.config import (
+    MODALIDADE_GLAUCOMA,
+    AppConfig,
+    config_dir,
+    fim_offset_meses,
+    resolve_path,
+)
 from apac_bot.connectors import BiodataMappingError, build_connector
 from apac_bot.console_screen import (
     CampoApac,
@@ -138,22 +143,29 @@ from apac_bot.normalize import (
     tipo_logradouro_do_endereco,
 )
 from apac_bot.progress import ProgressStore, filtrar_pendentes_lote
+from apac_bot.set_layout import ultimo_dia_mes
 from apac_bot.sheet import SheetError, listar_lancamentos_a_partir
 
 log = setup_logging()
 
 
-def datas_validade_mes_anterior(hoje: Optional[date] = None) -> tuple[str, str]:
+def datas_validade_mes_anterior(
+    hoje: Optional[date] = None,
+    fim_offset_meses: int = 0,
+) -> tuple[str, str]:
     """
-    Primeiro e ultimo dia do mes anterior, como DDMMAAAA (mascara APAC sem barras).
-    Ex.: hoje 09/10/2026 -> ('01092026', '30092026').
+    Primeiro dia do mes anterior e ultimo dia de (mes anterior + offset),
+    como DDMMAAAA (mascara APAC sem barras).
+    Ex.: hoje 09/10/2026, offset 0 -> ('01092026', '30092026').
+    Ex.: hoje 09/10/2026, offset 2 -> ('01092026', '30112026') (Glaucoma).
     """
     ref = hoje or date.today()
     primeiro_mes_atual = ref.replace(day=1)
     ultimo_mes_ant = primeiro_mes_atual - timedelta(days=1)
     primeiro_mes_ant = ultimo_mes_ant.replace(day=1)
-    _, ultimo_dia = calendar.monthrange(primeiro_mes_ant.year, primeiro_mes_ant.month)
-    fim = primeiro_mes_ant.replace(day=ultimo_dia)
+    fim = ultimo_dia_mes(
+        primeiro_mes_ant.year, primeiro_mes_ant.month, fim_offset_meses
+    )
     return (
         primeiro_mes_ant.strftime("%d%m%Y"),
         fim.strftime("%d%m%Y"),
@@ -1639,7 +1651,9 @@ class ApacAutomator:
         if self._validade_preenchida:
             return
 
-        inicio, fim = datas_validade_mes_anterior()
+        inicio, fim = datas_validade_mes_anterior(
+            fim_offset_meses=fim_offset_meses(self.cfg.modalidade)
+        )
         inicio_legivel = f"{inicio[:2]}/{inicio[2:4]}/{inicio[4:]}"
         fim_legivel = f"{fim[:2]}/{fim[2:4]}/{fim[4:]}"
 
@@ -1690,17 +1704,13 @@ class ApacAutomator:
     def preencher_tipo_e_nacionalidade(self) -> None:
         """
         Apos FIM DA VALIDADE o foco ja esta em TIPO DE APAC:
-          1) s + digita tipo_apac (1 ou 3; sem Enter) — APAC foca NACIONALIDADE
+          1) s + digita tipo_apac (3 padrao / 1 glaucoma; sem Enter)
           2) s + Enter em NACIONALIDADE (nao digitar; pula)
         """
         if self._tipo_nacionalidade_feito:
             return
 
-        tipo = str(self.cfg.dados_fixos.get("tipo_apac") or "").strip()
-        if not tipo:
-            raise ApacBlockedError(
-                "dados_fixos.tipo_apac e obrigatorio (1 ou 3; UI futura por clinica)."
-            )
+        tipo = "1" if self.cfg.modalidade == MODALIDADE_GLAUCOMA else "3"
 
         if self.dry_run:
             log.info(
@@ -3255,14 +3265,13 @@ class ApacAutomator:
     def preencher_motivo_saida(self) -> None:
         """
         Na lista PROCEDIMENTOS REALIZADOS: Tab ate MOTIVO SAIDA
-        (Enter na grade edita o registro), digita 12 e Enter.
-        Nao preenche DATA ALTA.
+        (Enter na grade edita o registro), digita 12 (padrao) ou 15 (glaucoma)
+        e Enter. Nao preenche DATA ALTA.
         """
         if self._motivo_saida_preenchido:
             return
 
-        digitar = self._dado_fixo("motivo_saida", "12") or "12"
-        digitar = "".join(ch for ch in digitar if ch.isdigit()) or "12"
+        digitar = "15" if self.cfg.modalidade == MODALIDADE_GLAUCOMA else "12"
 
         if self.dry_run:
             log.info("[dry-run] MOTIVO SAIDA — Tab, %s + Enter", digitar)
@@ -3328,7 +3337,9 @@ class ApacAutomator:
         if self._data_alta_preenchida:
             return
 
-        _, fim = datas_validade_mes_anterior()
+        _, fim = datas_validade_mes_anterior(
+            fim_offset_meses=fim_offset_meses(self.cfg.modalidade)
+        )
         fim_legivel = f"{fim[:2]}/{fim[2:4]}/{fim[4:]}"
 
         if self.dry_run:
@@ -3638,7 +3649,9 @@ class ApacAutomator:
             "autorizador_nome", AUTORIZADOR_NOME_PADRAO
         ) or AUTORIZADOR_NOME_PADRAO
         orgao = self._dado_fixo("cod_orgao_emiss", "M211130001")
-        inicio, _fim = datas_validade_mes_anterior()
+        inicio, _fim = datas_validade_mes_anterior(
+            fim_offset_meses=fim_offset_meses(self.cfg.modalidade)
+        )
         inicio_legivel = f"{inicio[:2]}/{inicio[2:4]}/{inicio[4:]}"
 
         if self.dry_run:

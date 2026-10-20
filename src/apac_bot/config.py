@@ -26,6 +26,32 @@ REQUIRED_BIODATA_NAV = (
 
 REQUIRED_COLUMN_KEYS = ("PACIENTE", "COD", "AUDITOR", "NUMERACAO")
 
+# Modalidade do fluxo APAC (apac.modalidade). Distinto de dados_fixos.tipo_apac.
+MODALIDADE_PADRAO = "padrao"
+MODALIDADE_GLAUCOMA = "glaucoma"
+MODALIDADES_VALIDAS = frozenset({MODALIDADE_PADRAO, MODALIDADE_GLAUCOMA})
+
+
+def normalizar_modalidade_cfg(valor: object) -> str:
+    """Normaliza apac.modalidade para padrao|glaucoma (default padrao)."""
+    raw = str(valor or "").strip().lower()
+    if raw in MODALIDADES_VALIDAS:
+        return raw
+    # Labels da UI / variantes comuns.
+    if raw in {"apac glaucoma"}:
+        return MODALIDADE_GLAUCOMA
+    if raw in {"padrão", "apac padrao", "apac padrão"}:
+        return MODALIDADE_PADRAO
+    return MODALIDADE_PADRAO
+
+
+def fim_offset_meses(modalidade: str) -> int:
+    """
+    Meses a somar ao mês-base para o FIM DA VALIDADE.
+    Padrão: 0 (último dia do mês-base). Glaucoma: 2 (ex. set → nov).
+    """
+    return 2 if normalizar_modalidade_cfg(modalidade) == MODALIDADE_GLAUCOMA else 0
+
 
 class ConfigError(Exception):
     pass
@@ -41,6 +67,11 @@ class AppConfig:
         return str(self.raw["clinica_id"])
 
     @property
+    def modalidade(self) -> str:
+        """apac.modalidade: padrao | glaucoma."""
+        return normalizar_modalidade_cfg(self.apac.get("modalidade"))
+
+    @property
     def sistema_origem(self) -> str:
         return str(self.raw.get("sistema_origem", "mock")).lower()
 
@@ -51,6 +82,13 @@ class AppConfig:
     @property
     def planilha_aba(self) -> str:
         return str(self.raw["planilha"]["aba"])
+
+    @property
+    def planilha_aba_glaucoma(self) -> str:
+        """Aba de faturamento no CENARIO glaucoma (Base Consultas / TRAT *)."""
+        return str(
+            (self.raw.get("planilha") or {}).get("aba_glaucoma") or ""
+        ).strip()
 
     @property
     def planilha_linha_cabecalho(self) -> int:
@@ -123,6 +161,13 @@ class AppConfig:
         novo["planilha"] = planilha
         return AppConfig(raw=novo, path=self.path)
 
+    def with_aba_glaucoma(self, aba: str) -> "AppConfig":
+        novo = dict(self.raw)
+        planilha = dict(novo.get("planilha") or {})
+        planilha["aba_glaucoma"] = str(aba or "").strip()
+        novo["planilha"] = planilha
+        return AppConfig(raw=novo, path=self.path)
+
 
 def load_config(path: str | Path) -> AppConfig:
     p = Path(path)
@@ -180,7 +225,7 @@ def validate_config(
         if key not in colunas or not colunas[key]:
             erros.append(f"planilha.colunas.{key} é obrigatório.")
 
-    if origem == "biodata":
+    if origem == "biodata" and cfg.modalidade != MODALIDADE_GLAUCOMA:
         pront = cfg.raw.get("planilha_prontuarios") or {}
         if not str(pront.get("caminho") or "").strip():
             erros.append(

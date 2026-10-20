@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional, Sequence
 
+from apac_bot.config import MODALIDADE_GLAUCOMA, normalizar_modalidade_cfg
+
 LINE_ENDING = b"\r\n"
 EOF_SUB = b"\x1a"
 
@@ -65,15 +67,26 @@ def competencia_aaaamm(valor: Optional[str]) -> str:
     raise SetLayoutError(f"competencia invalida (esperado AAAAMM): {valor!r}")
 
 
-def datas_competencia(comp: str) -> tuple[str, str]:
-    """Retorna (primeiro_dia, ultimo_dia) AAAAMMDD da competencia."""
+def ultimo_dia_mes(ano: int, mes: int, offset_meses: int = 0) -> date:
+    """Último dia do mês (ano, mes) + offset_meses (trata virada de ano)."""
     import calendar
 
+    m0 = mes - 1 + offset_meses
+    y = ano + m0 // 12
+    m = m0 % 12 + 1
+    return date(y, m, calendar.monthrange(y, m)[1])
+
+
+def datas_competencia(comp: str, fim_offset_meses: int = 0) -> tuple[str, str]:
+    """
+    Retorna (primeiro_dia, ultimo_dia) AAAAMMDD da competencia.
+    fim_offset_meses: 0 = último dia do mês da competência;
+    2 = último dia de competência+2 (APAC Glaucoma).
+    """
     c = competencia_aaaamm(comp)
     ano, mes = int(c[:4]), int(c[4:6])
-    ultimo_dia = calendar.monthrange(ano, mes)[1]
     primeiro = date(ano, mes, 1)
-    ultimo = date(ano, mes, ultimo_dia)
+    ultimo = ultimo_dia_mes(ano, mes, fim_offset_meses)
     return primeiro.strftime("%Y%m%d"), ultimo.strftime("%Y%m%d")
 
 
@@ -200,7 +213,11 @@ class ProcedimentoSet:
 class PacienteSetRecord:
     corpo: CorpoApacSet
     cid: CidGeralSet
-    procedimento: ProcedimentoSet
+    procedimentos: tuple[ProcedimentoSet, ...]
+
+    def __post_init__(self) -> None:
+        if not self.procedimentos:
+            raise SetLayoutError("PacienteSetRecord exige ao menos 1 procedimento")
 
 
 def _digitos_como_int(valor: object) -> int:
@@ -212,12 +229,12 @@ def calcular_smt_vrf(pacientes: Sequence[PacienteSetRecord]) -> str:
     """Campo de controle do cabecalho: (soma proc+qtd+APAC) % 1111 + 1111."""
     total = 0
     for pac in pacientes:
-        proc = pac.procedimento
-        total += (
-            _digitos_como_int(proc.codigo_procedimento)
-            + _digitos_como_int(proc.quantidade)
-            + _digitos_como_int(proc.numeracao)
-        )
+        for proc in pac.procedimentos:
+            total += (
+                _digitos_como_int(proc.codigo_procedimento)
+                + _digitos_como_int(proc.quantidade)
+                + _digitos_como_int(proc.numeracao)
+            )
     valor = (total % SMT_VRF_MODULO) + SMT_VRF_MODULO
     return pad_num(valor, 4)
 
@@ -383,15 +400,25 @@ def montar_arquivo(
     for pac in pacientes:
         lines.append(montar_corpo_14(pac.corpo))
         lines.append(montar_cid_06(pac.cid))
-        lines.append(montar_proc_13(pac.procedimento))
+        for proc in pac.procedimentos:
+            lines.append(montar_proc_13(proc))
     body = LINE_ENDING.join(line.encode("latin-1") for line in lines)
     return body + LINE_ENDING + EOF_SUB
 
 
-def nome_arquivo_set(competencia: str, prefixo: str = "APOFTAL") -> str:
-    """APOFTAL9.SET a partir de competencia 202609."""
+def nome_arquivo_set(competencia: str, modalidade: str) -> str:
+    """APOFTA09.SET / APGLAU09.SET a partir da competencia do lote (AAAAMM).
+
+    Basename sempre 8 caracteres: prefixo da modalidade (6) + MM (2).
+    A competencia do lote ja e o mes anterior no dominio — nao subtrair 1.
+    """
     c = competencia_aaaamm(competencia)
-    mes = int(c[4:6])
+    mes = c[4:6]
+    prefixo = (
+        "APGLAU"
+        if normalizar_modalidade_cfg(modalidade) == MODALIDADE_GLAUCOMA
+        else "APOFTA"
+    )
     return f"{prefixo}{mes}.SET"
 
 

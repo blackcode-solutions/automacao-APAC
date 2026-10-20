@@ -55,6 +55,8 @@ class Lancamento:
     paciente: Optional[PacienteDados] = None
     estado: EstadoLancamento = EstadoLancamento.PENDENTE
     motivo: Optional[str] = None
+    # Glaucoma: códigos extras da coluna "Associado a" (entre parênteses).
+    codigos_associados: list[str] = field(default_factory=list)
     extras: dict[str, Any] = field(default_factory=dict)
 
     @property

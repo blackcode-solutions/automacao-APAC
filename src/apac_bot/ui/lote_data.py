@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Optional
 from apac_bot.config import AppConfig, config_dir, load_config, resolve_path
 from apac_bot.models import EstadoLancamento, Lancamento
 from apac_bot.progress import ProgressRecord, ProgressStore
-from apac_bot.sheet import SheetError, listar_lancamentos_a_partir
+from apac_bot.sheet import SheetError, listar_lancamentos_a_partir, load_lancamentos
 
 STATUS_LABELS: dict[EstadoLancamento, str] = {
     EstadoLancamento.CONCLUIDO: "Concluído",
@@ -223,26 +224,72 @@ def merge_lote_rows(
     return rows
 
 
-def load_lote_snapshot(config_path: Path) -> LoteSnapshot:
+def _fila_para_painel(
+    cfg: AppConfig, planilha_override: Optional[Path] = None
+) -> list[Lancamento]:
+    """
+    Fila exibida no painel: a partir de paciente_inicio se configurado;
+    senão todos os lançamentos da planilha (preview ao anexar).
+    """
+    nome_alvo = (cfg.apac.get("paciente_inicio") or "").strip()
+    if nome_alvo:
+        return listar_lancamentos_a_partir(cfg, planilha_override)
+    result = load_lancamentos(cfg, planilha_override)
+    if not result.ok:
+        raise SheetError(
+            "Falha ao carregar planilha: " + "; ".join(result.erros[:5])
+        )
+    if not result.lancamentos:
+        raise SheetError("Planilha sem lançamentos ativos.")
+    return list(result.lancamentos)
+
+
+def load_lote_snapshot(
+    config_path: Path,
+    *,
+    planilha_override: Optional[Path] = None,
+    aba_glaucoma_override: Optional[str] = None,
+) -> LoteSnapshot:
     """
     Lê config + planilha + SQLite e devolve snapshot para o painel.
     Em erro de planilha/config, retorna snapshot vazio com `erro` preenchido
     (não levanta — a UI mostra o aviso).
+
+    planilha_override: path escolhido no Browse (ainda não salvo no config).
+    aba_glaucoma_override: aba escolhida no dropdown (ainda não salva).
     """
     path = Path(config_path)
+    override = Path(planilha_override) if planilha_override is not None else None
     try:
         cfg = load_config(path)
     except Exception as exc:
-        return LoteSnapshot(
-            rows=(),
-            concluidos=0,
-            total=0,
-            ultima_etapa="",
-            erro=str(exc),
-        )
+        if override is None:
+            return LoteSnapshot(
+                rows=(),
+                concluidos=0,
+                total=0,
+                ultima_etapa="",
+                erro=str(exc),
+            )
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            cfg = AppConfig(raw=raw, path=path)
+        except Exception:
+            return LoteSnapshot(
+                rows=(),
+                concluidos=0,
+                total=0,
+                ultima_etapa="",
+                erro=str(exc),
+            )
+
+    if override is not None:
+        cfg = cfg.with_planilha(override)
+    if aba_glaucoma_override is not None:
+        cfg = cfg.with_aba_glaucoma(aba_glaucoma_override)
 
     try:
-        fila = listar_lancamentos_a_partir(cfg)
+        fila = _fila_para_painel(cfg, override)
     except SheetError as exc:
         return LoteSnapshot(
             rows=(),

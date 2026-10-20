@@ -11,12 +11,14 @@ from apac_bot.set_layout import (
     PacienteSetRecord,
     ProcedimentoSet,
     calcular_smt_vrf,
+    datas_competencia,
     montar_arquivo,
     montar_cabecalho,
     montar_cid_06,
     montar_corpo_14,
     montar_proc_13,
     nome_arquivo_set,
+    ultimo_dia_mes,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "APOFTAL9.txt"
@@ -27,8 +29,10 @@ def _slice(line: str, ini: int, fim: int) -> str:
 
 
 def test_nome_arquivo_set():
-    assert nome_arquivo_set("202609") == "APOFTAL9.SET"
-    assert nome_arquivo_set("202612") == "APOFTAL12.SET"
+    assert nome_arquivo_set("202609", "padrao") == "APOFTA09.SET"
+    assert nome_arquivo_set("202612", "padrao") == "APOFTA12.SET"
+    assert nome_arquivo_set("202610", "glaucoma") == "APGLAU10.SET"
+    assert nome_arquivo_set("202601", "padrao") == "APOFTA01.SET"
 
 
 def test_calcular_smt_vrf_um_paciente():
@@ -91,12 +95,14 @@ def test_calcular_smt_vrf_um_paciente():
             numeracao="2126205409218",
             cid_principal="H250",
         ),
-        procedimento=ProcedimentoSet(
-            competencia="202609",
-            numeracao="2126205409218",
-            codigo_procedimento="0405050372",
-            cbo="225265",
-            quantidade="0000001",
+        procedimentos=(
+            ProcedimentoSet(
+                competencia="202609",
+                numeracao="2126205409218",
+                codigo_procedimento="0405050372",
+                cbo="225265",
+                quantidade="0000001",
+            ),
         ),
     )
     assert calcular_smt_vrf([pac]) == "1905"
@@ -130,8 +136,9 @@ def test_golden_regen_igual_fixture():
     pacientes: list[PacienteSetRecord] = []
     i = 1
     while i < len(lines):
-        b, c06, p13 = lines[i], lines[i + 1], lines[i + 2]
+        b, c06 = lines[i], lines[i + 1]
         assert b.startswith("14") and len(b) == 537
+        assert c06.startswith("06")
         corpo = CorpoApacSet(
             competencia=_slice(b, 3, 8),
             numeracao=_slice(b, 9, 21),
@@ -193,27 +200,165 @@ def test_golden_regen_igual_fixture():
         )
         assert montar_cid_06(cid) == c06
 
-        proc = ProcedimentoSet(
-            competencia=_slice(p13, 3, 8),
-            numeracao=_slice(p13, 9, 21),
-            codigo_procedimento=_slice(p13, 22, 31),
-            cbo=_slice(p13, 32, 37),
-            quantidade=_slice(p13, 38, 44),
-            cnpj_cessao=_slice(p13, 45, 58),
-            nota_fiscal=_slice(p13, 59, 64),
-            cid_principal=_slice(p13, 65, 68),
-            cid_secundario=_slice(p13, 69, 72),
-            codigo_servico=_slice(p13, 73, 75),
-            codigo_classificacao=_slice(p13, 76, 78),
-            equipe_seq=_slice(p13, 79, 86),
-            equipe_area=_slice(p13, 87, 90),
-            cnes_terceiro=_slice(p13, 91, 97),
+        i += 2
+        procs: list[ProcedimentoSet] = []
+        while i < len(lines) and lines[i].startswith("13"):
+            p13 = lines[i]
+            proc = ProcedimentoSet(
+                competencia=_slice(p13, 3, 8),
+                numeracao=_slice(p13, 9, 21),
+                codigo_procedimento=_slice(p13, 22, 31),
+                cbo=_slice(p13, 32, 37),
+                quantidade=_slice(p13, 38, 44),
+                cnpj_cessao=_slice(p13, 45, 58),
+                nota_fiscal=_slice(p13, 59, 64),
+                cid_principal=_slice(p13, 65, 68),
+                cid_secundario=_slice(p13, 69, 72),
+                codigo_servico=_slice(p13, 73, 75),
+                codigo_classificacao=_slice(p13, 76, 78),
+                equipe_seq=_slice(p13, 79, 86),
+                equipe_area=_slice(p13, 87, 90),
+                cnes_terceiro=_slice(p13, 91, 97),
+            )
+            assert montar_proc_13(proc) == p13
+            procs.append(proc)
+            i += 1
+        assert procs, "paciente sem linha 13"
+        pacientes.append(
+            PacienteSetRecord(corpo=corpo, cid=cid, procedimentos=tuple(procs))
         )
-        assert montar_proc_13(proc) == p13
-        pacientes.append(PacienteSetRecord(corpo=corpo, cid=cid, procedimento=proc))
-        i += 3
 
     assert len(pacientes) == 3
     assert calcular_smt_vrf(pacientes) == smt_fixture
     regenerated = montar_arquivo(cab, pacientes)
     assert regenerated == raw
+
+
+def test_calcular_smt_vrf_soma_todos_procedimentos():
+    """SMT soma codigo+qtd+numeracao de cada linha 13."""
+    base_proc = dict(
+        competencia="202609",
+        numeracao="2126205409218",
+        cbo="225265",
+        quantidade="0000001",
+    )
+    pac = PacienteSetRecord(
+        corpo=CorpoApacSet(
+            competencia="202609",
+            numeracao="2126205409218",
+            uf_ibge="21",
+            cnes="6618839",
+            data_proc="20260901",
+            data_ini_val="20260901",
+            data_fim_val="20260930",
+            tipo_atendimento="07",
+            tipo_apac="1",
+            nome="A",
+            nome_mae="B",
+            logradouro="C",
+            numero="1",
+            complemento="",
+            cep="65000000",
+            municipio_ibge="211230",
+            nascimento="19800101",
+            sexo="M",
+            medico_responsavel="D",
+            codigo_procedimento="0303050160",
+            motivo_saida="15",
+            data_obito_alta="20261130",
+            autorizador_nome="E",
+            cns_paciente="",
+            cns_medico="705609469670213",
+            cns_autorizador="708107527671032",
+            cid_causas="",
+            prontuario="0000000001",
+            cnes_solicitante="6618839",
+            data_solicitacao="20260901",
+            data_autorizacao="20260901",
+            cod_orgao_emiss="E210000001",
+            carater_atend="01",
+            apac_anterior="0000000000000",
+            raca="03",
+            nome_responsavel_pac="O MESMO",
+            nacionalidade="010",
+            etnia="",
+            codigo_logradouro="008",
+            bairro="CENTRO",
+            ddd="",
+            telefone="",
+            email="",
+            cns_executante="701003891196892",
+            cpf="03345250390",
+            ine="",
+            situacao_rua="N",
+            fonte_orcamentaria="",
+            emendas="",
+            sem_cpf="N",
+        ),
+        cid=CidGeralSet(
+            competencia="202609",
+            numeracao="2126205409218",
+            cid_principal="H401",
+        ),
+        procedimentos=(
+            ProcedimentoSet(**base_proc, codigo_procedimento="0303050160"),
+            ProcedimentoSet(**base_proc, codigo_procedimento="0303050187"),
+            ProcedimentoSet(**base_proc, codigo_procedimento="0303050195"),
+        ),
+    )
+    # 3 * (proc + 1 + numeracao) — soma dos tres codigos
+    esperado_total = (
+        303050160
+        + 303050187
+        + 303050195
+        + 3 * 1
+        + 3 * 2126205409218
+    )
+    assert calcular_smt_vrf([pac]) == str(
+        (esperado_total % 1111) + 1111
+    ).zfill(4)
+
+    cab = CabecalhoSet(
+        competencia="202609",
+        qtd_apac=1,
+        smt_vrf="0000",
+        orgao_origem="CLINICA",
+        sigla="CSMG",
+        cgc="01192155000210",
+        orgao_destino="SECRETARIA",
+        destino_in="E",
+        data_geracao="20261001",
+        versao="Versao 04.01",
+    )
+    raw = montar_arquivo(cab, [pac])
+    text = raw.decode("latin-1").replace("\x1a", "")
+    lines = [ln for ln in text.split("\r\n") if ln]
+    assert lines[1].startswith("14")
+    assert lines[2].startswith("06")
+    assert sum(1 for ln in lines if ln.startswith("13")) == 3
+    assert _slice(lines[3], 22, 31) == "0303050160"
+    assert _slice(lines[4], 22, 31) == "0303050187"
+    assert _slice(lines[5], 22, 31) == "0303050195"
+
+
+def test_datas_competencia_padrao():
+    ini, fim = datas_competencia("202609")
+    assert ini == "20260901"
+    assert fim == "20260930"
+
+
+def test_datas_competencia_glaucoma_fim_mais_dois_meses():
+    ini, fim = datas_competencia("202609", fim_offset_meses=2)
+    assert ini == "20260901"
+    assert fim == "20261130"
+
+
+def test_datas_competencia_glaucoma_virada_de_ano():
+    ini, fim = datas_competencia("202611", fim_offset_meses=2)
+    assert ini == "20261101"
+    assert fim == "20270131"
+
+
+def test_ultimo_dia_mes_fevereiro_bissexto():
+    assert ultimo_dia_mes(2024, 2, 0).strftime("%Y%m%d") == "20240229"
+    assert ultimo_dia_mes(2023, 12, 2).strftime("%Y%m%d") == "20240229"

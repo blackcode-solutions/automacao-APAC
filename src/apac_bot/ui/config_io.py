@@ -8,36 +8,89 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+# Modalidade do fluxo UI (header). Distinto de dados_fixos.tipo_apac (1|3).
+MODALIDADE_PADRAO = "padrao"
+MODALIDADE_GLAUCOMA = "glaucoma"
+MODALIDADES_VALIDAS = frozenset({MODALIDADE_PADRAO, MODALIDADE_GLAUCOMA})
+MODALIDADE_LABELS: dict[str, str] = {
+    MODALIDADE_PADRAO: "APAC Padrão",
+    MODALIDADE_GLAUCOMA: "APAC Glaucoma",
+}
+MODALIDADES_UI: tuple[str, ...] = tuple(
+    MODALIDADE_LABELS[k] for k in (MODALIDADE_PADRAO, MODALIDADE_GLAUCOMA)
+)
+
 # Seções da UI agrupadas por tela do APAC Magnético (ordem do fluxo).
 UI_SECOES_TELA: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Identificação",
-        ("cnes_solicitante", "cnes_executante", "tipo_apac"),
+        ("cnes_solicitante", "cnes_executante"),
     ),
     (
         "Procedimentos",
         (
             "codigo_procedimento",
             "cbo",
-            "quantidade_procedimento",
             "cns_executante",
-            "motivo_saida",
         ),
     ),
     (
         "Solicitação / Autorização",
         (
-            "carater_atend",
             "medico_solicitante_cns",
             "medico_solicitante_nome",
         ),
     ),
 )
 
-# Flatten das seções + campos com controles especiais fora da grade.
-DADOS_FIXOS_UI_KEYS: tuple[str, ...] = tuple(
-    key for _titulo, keys in UI_SECOES_TELA for key in keys
-) + ("autorizador_cns", "autorizador_nome", "cod_orgao_emiss")
+# Seções da APAC Glaucoma (mesmo layout; tipo_apac forçado nos ocultos).
+# codigo_procedimento vem da planilha (Código + Associado a), não da UI.
+UI_SECOES_GLAUCOMA: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Identificação",
+        ("cnes_solicitante", "cnes_executante"),
+    ),
+    (
+        "Procedimentos",
+        (
+            "cbo",
+            "cns_executante",
+        ),
+    ),
+    (
+        "Solicitação / Autorização",
+        (
+            "medico_solicitante_cns",
+            "medico_solicitante_nome",
+        ),
+    ),
+)
+
+# Valores fixos da APAC Padrão — não aparecem na UI; gravados no save.
+DADOS_FIXOS_PADRAO_OCULTOS: dict[str, str] = {
+    "tipo_apac": "3",
+    "quantidade_procedimento": "1",
+    "motivo_saida": "12",
+    "carater_atend": "01",
+    "cod_orgao_emiss": "M211130001",  # Municipal
+    "cid_principal": "H250",
+}
+
+# Valores fixos da APAC Glaucoma — fora da UI.
+DADOS_FIXOS_GLAUCOMA_OCULTOS: dict[str, str] = {
+    "tipo_apac": "1",
+    "tipo_atendimento": "07",
+    "motivo_saida": "15",
+    "cod_orgao_emiss": "E210000001",  # Estadual
+    "cid_principal": "H401",
+}
+
+# Flatten das seções + ocultos + campos com controles especiais fora da grade.
+DADOS_FIXOS_UI_KEYS: tuple[str, ...] = (
+    tuple(key for _titulo, keys in UI_SECOES_TELA for key in keys)
+    + tuple(DADOS_FIXOS_PADRAO_OCULTOS.keys())
+    + ("autorizador_cns", "autorizador_nome")
+)
 
 # Labels amigáveis (UI).
 DADOS_FIXOS_LABELS: dict[str, str] = {
@@ -106,6 +159,31 @@ def normalizar_sistema_origem(valor: str) -> str:
     return str(valor or "").strip().lower()
 
 
+def normalizar_modalidade(valor: str) -> str:
+    key = str(valor or "").strip().lower()
+    if key in MODALIDADES_VALIDAS:
+        return key
+    # Labels da UI → código canônico.
+    for codigo, label in MODALIDADE_LABELS.items():
+        if label.lower() == str(valor or "").strip().lower():
+            return codigo
+    return MODALIDADE_PADRAO
+
+
+def modalidade_ui_label(modalidade: str) -> str:
+    return MODALIDADE_LABELS.get(
+        normalizar_modalidade(modalidade), MODALIDADE_LABELS[MODALIDADE_PADRAO]
+    )
+
+
+def secoes_para_modalidade(
+    modalidade: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if normalizar_modalidade(modalidade) == MODALIDADE_GLAUCOMA:
+        return UI_SECOES_GLAUCOMA
+    return UI_SECOES_TELA
+
+
 def aplicar_defaults_clinica(clinica_id: str) -> dict[str, str]:
     """Retorna CNES (e futuros defaults) da clínica, ou {} se desconhecida."""
     key = str(clinica_id or "").strip()
@@ -142,13 +220,23 @@ class UiFormData:
     clinica_id: str = ""
     planilha_caminho: str = ""
     planilha_prontuarios_caminho: str = ""
+    planilha_aba_glaucoma: str = ""
     paciente_inicio: str = ""
+    modalidade: str = MODALIDADE_PADRAO
     dados_fixos: dict[str, str] = field(default_factory=dict)
 
     def dados_fixos_completos(self) -> dict[str, str]:
         out: dict[str, str] = {}
         for key in DADOS_FIXOS_UI_KEYS:
             out[key] = str(self.dados_fixos.get(key, "") or "").strip()
+        modalidade = normalizar_modalidade(self.modalidade)
+        if modalidade == MODALIDADE_PADRAO:
+            # quantidade / motivo saída / caráter sempre fixos.
+            out.update(DADOS_FIXOS_PADRAO_OCULTOS)
+        elif modalidade == MODALIDADE_GLAUCOMA:
+            # Ocultos do Padrão + overrides Glaucoma (tipo_apac=1, tipate=07).
+            out.update(DADOS_FIXOS_PADRAO_OCULTOS)
+            out.update(DADOS_FIXOS_GLAUCOMA_OCULTOS)
         return out
 
 
@@ -175,6 +263,7 @@ def load_raw(path: Path) -> dict[str, Any]:
 def form_from_raw(raw: dict[str, Any]) -> UiFormData:
     planilha = raw.get("planilha") or {}
     prontuarios = raw.get("planilha_prontuarios") or {}
+    glaucoma = raw.get("planilha_glaucoma") or {}
     apac = raw.get("apac") or {}
     fixos = raw.get("dados_fixos") or {}
     dados: dict[str, str] = {}
@@ -189,12 +278,21 @@ def form_from_raw(raw: dict[str, Any]) -> UiFormData:
         clinica = clinicas[0]
     elif clinica and clinicas and clinica not in clinicas:
         clinica = clinicas[0] if len(clinicas) == 1 else ""
+    modalidade = normalizar_modalidade(str(apac.get("modalidade") or ""))
+    planilha_caminho = str(planilha.get("caminho") or "").strip()
+    # Legado dual: Relatório em planilha_glaucoma → usa como planilha.caminho.
+    if modalidade == MODALIDADE_GLAUCOMA and not planilha_caminho:
+        legado = str(glaucoma.get("caminho") or "").strip()
+        if legado:
+            planilha_caminho = legado
     return UiFormData(
         sistema_origem=sistema,
         clinica_id=clinica,
-        planilha_caminho=str(planilha.get("caminho") or "").strip(),
+        planilha_caminho=planilha_caminho,
         planilha_prontuarios_caminho=str(prontuarios.get("caminho") or "").strip(),
+        planilha_aba_glaucoma=str(planilha.get("aba_glaucoma") or "").strip(),
         paciente_inicio=str(apac.get("paciente_inicio") or "").strip(),
+        modalidade=modalidade,
         dados_fixos=dados,
     )
 
@@ -228,7 +326,14 @@ def validate_form(form: UiFormData) -> list[str]:
         )
     if not form.planilha_caminho.strip():
         erros.append("Caminho da planilha é obrigatório.")
-    if not form.planilha_prontuarios_caminho.strip():
+    modalidade = normalizar_modalidade(form.modalidade)
+    if modalidade == MODALIDADE_GLAUCOMA:
+        if (
+            form.planilha_caminho.strip()
+            and not form.planilha_aba_glaucoma.strip()
+        ):
+            erros.append("Aba da planilha glaucoma é obrigatória.")
+    elif not form.planilha_prontuarios_caminho.strip():
         erros.append("Caminho da planilha de prontuários é obrigatório.")
 
     fixos = form.dados_fixos_completos()
@@ -270,7 +375,14 @@ def merge_form_into_raw(raw: dict[str, Any], form: UiFormData) -> dict[str, Any]
 
     planilha = dict(out.get("planilha") or {})
     planilha["caminho"] = form.planilha_caminho.strip()
+    modalidade = normalizar_modalidade(form.modalidade)
+    if modalidade == MODALIDADE_GLAUCOMA:
+        planilha["aba_glaucoma"] = form.planilha_aba_glaucoma.strip()
     out["planilha"] = planilha
+
+    # Bloco dual antigo deixa de ser usado; remove path órfão no save Glaucoma.
+    if modalidade == MODALIDADE_GLAUCOMA and "planilha_glaucoma" in out:
+        out.pop("planilha_glaucoma", None)
 
     prontuarios = dict(out.get("planilha_prontuarios") or {})
     if not prontuarios:
@@ -284,11 +396,19 @@ def merge_form_into_raw(raw: dict[str, Any], form: UiFormData) -> dict[str, Any]
                 prontuarios["colunas"] = cols
             else:
                 prontuarios.setdefault(key, valor)
-    prontuarios["caminho"] = form.planilha_prontuarios_caminho.strip()
+    caminho_pront = form.planilha_prontuarios_caminho.strip()
+    # Glaucoma não anexa prontuários — não zerar path do Padrão no JSON.
+    if not (
+        modalidade == MODALIDADE_GLAUCOMA
+        and not caminho_pront
+        and str(prontuarios.get("caminho") or "").strip()
+    ):
+        prontuarios["caminho"] = caminho_pront
     out["planilha_prontuarios"] = prontuarios
 
     apac = dict(out.get("apac") or {})
     apac["paciente_inicio"] = form.paciente_inicio.strip()
+    apac["modalidade"] = modalidade
     out["apac"] = apac
 
     fixos = dict(out.get("dados_fixos") or {})
@@ -332,6 +452,25 @@ def save_form(
         encoding="utf-8",
     )
     return merged
+
+
+def save_modalidade(path: Path, modalidade: str) -> str:
+    """
+    Grava só apac.modalidade (sem validar o restante do formulário).
+    Permite persistir a troca Padrão/Glaucoma mesmo com Glaucoma incompleto.
+    """
+    if not path.is_file():
+        raise ConfigIoError(f"Arquivo de configuração não encontrado: {path}")
+    raw = load_raw(path)
+    codigo = normalizar_modalidade(modalidade)
+    apac = dict(raw.get("apac") or {})
+    apac["modalidade"] = codigo
+    raw["apac"] = apac
+    path.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return codigo
 
 
 def secrets_missing(config_path: Path) -> bool:

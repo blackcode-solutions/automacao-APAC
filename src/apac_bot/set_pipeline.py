@@ -7,7 +7,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from apac_bot.config import AppConfig, config_dir, resolve_path
+from apac_bot.config import (
+    MODALIDADE_GLAUCOMA,
+    AppConfig,
+    config_dir,
+    fim_offset_meses,
+    normalizar_modalidade_cfg,
+    resolve_path,
+)
 from apac_bot.connectors import build_connector
 from apac_bot.connectors.biodata import BiodataMappingError
 from apac_bot.logging_safe import setup_logging, short_id
@@ -45,6 +52,29 @@ from apac_bot.sheet import SheetError, listar_lancamentos_a_partir, nome_mae_val
 log = setup_logging()
 
 STAGING_NAME = "lote_atual.SET"
+
+# (codigo_servico, codigo_classificacao) por procedimento — só Glaucoma.
+# Códigos ausentes → ("", "") na linha 13.
+GLAUCOMA_SERVICO_CLASSIFICACAO: dict[str, tuple[str, str]] = {
+    "0303050012": ("131", "002"),  # acompanhamento
+    "0303050187": ("", ""),
+    "0301010102": ("131", "001"),  # consulta
+}
+
+
+def servico_classificacao_glaucoma(codigo: str) -> tuple[str, str]:
+    """Retorna (serviço, classificação) para o código do procedimento Glaucoma."""
+    digitos = "".join(ch for ch in str(codigo or "") if ch.isdigit())
+    return GLAUCOMA_SERVICO_CLASSIFICACAO.get(digitos, ("", ""))
+
+
+def destino_in_para_modalidade(modalidade: str) -> str:
+    """CBC-DST-IN: M (padrão) / E (glaucoma)."""
+    return (
+        "E"
+        if normalizar_modalidade_cfg(modalidade) == MODALIDADE_GLAUCOMA
+        else "M"
+    )
 
 
 def _store(cfg: AppConfig) -> ProgressStore:
@@ -107,7 +137,9 @@ def montar_record_paciente(
     if motivo:
         raise SetLayoutError(motivo)
 
-    ini, fim = datas_competencia(competencia)
+    ini, fim = datas_competencia(
+        competencia, fim_offset_meses=fim_offset_meses(cfg.modalidade)
+    )
     num = numeracao_13(lanc.numeracao_original)
     cpf = cpf_digitos(pac.cpf)
     sexo = sexo_para_apac(pac.sexo) or ""
@@ -119,17 +151,45 @@ def montar_record_paciente(
     if not nome_mae_valido(pac.nome_mae, lanc.paciente_nome):
         raise SetLayoutError("nome_mae invalido")
 
-    cid = _fixo(cfg, "cid_principal", "H250")
-    proc_cod = _fixo(cfg, "codigo_procedimento") or "".join(
-        ch for ch in lanc.codigo_apac if ch.isdigit()
+    cid = (
+        "H401"
+        if cfg.modalidade == MODALIDADE_GLAUCOMA
+        else _fixo(cfg, "cid_principal", "H250")
     )
-    if not proc_cod:
-        raise SetLayoutError("codigo_procedimento ausente")
+
+    def _so_digitos(valor: object) -> str:
+        return "".join(ch for ch in str(valor or "") if ch.isdigit())
+
+    if cfg.modalidade == MODALIDADE_GLAUCOMA:
+        principal = _so_digitos(lanc.codigo_apac)
+        if not principal:
+            raise SetLayoutError("codigo_procedimento ausente na planilha")
+        associados = [
+            dig
+            for dig in (_so_digitos(c) for c in lanc.codigos_associados)
+            if dig
+        ]
+        codigos_proc = [principal] + associados
+    else:
+        proc_cod = _fixo(cfg, "codigo_procedimento") or _so_digitos(
+            lanc.codigo_apac
+        )
+        if not proc_cod:
+            raise SetLayoutError("codigo_procedimento ausente")
+        codigos_proc = [proc_cod]
+    proc_cod = codigos_proc[0]
 
     cnes = _fixo(cfg, "cnes_executante") or _fixo(cfg, "cnes_solicitante")
     cnes_sol = _fixo(cfg, "cnes_solicitante") or cnes
     mun = _fixo(cfg, "municipio_ibge_padrao", "211230")
     sem_cpf = "N" if tem_cpf_valido(cpf) else "S"
+    tipo_atend = (
+        "07"
+        if cfg.modalidade == MODALIDADE_GLAUCOMA
+        else _fixo(cfg, "tipo_atendimento", "00")
+    )
+    tipo_apac = "1" if cfg.modalidade == MODALIDADE_GLAUCOMA else "3"
+    motivo_saida = "15" if cfg.modalidade == MODALIDADE_GLAUCOMA else "12"
 
     corpo = CorpoApacSet(
         competencia=competencia,
@@ -139,8 +199,8 @@ def montar_record_paciente(
         data_proc=ini,
         data_ini_val=ini,
         data_fim_val=fim,
-        tipo_atendimento=_fixo(cfg, "tipo_atendimento", "00"),
-        tipo_apac=_fixo(cfg, "tipo_apac", "3"),
+        tipo_atendimento=tipo_atend,
+        tipo_apac=tipo_apac,
         nome=nome,
         nome_mae=mae,
         logradouro=_logradouro_limpo(pac),
@@ -152,7 +212,7 @@ def montar_record_paciente(
         sexo=sexo,
         medico_responsavel=_fixo(cfg, "medico_solicitante_nome"),
         codigo_procedimento=proc_cod,
-        motivo_saida=_fixo(cfg, "motivo_saida", "12"),
+        motivo_saida=motivo_saida,
         data_obito_alta=fim,
         autorizador_nome=_fixo(cfg, "autorizador_nome"),
         cns_paciente="".join(ch for ch in (pac.cns or "") if ch.isdigit()),
@@ -189,16 +249,30 @@ def montar_record_paciente(
         competencia=competencia, numeracao=num, cid_principal=cid
     )
     qtd = _fixo(cfg, "quantidade_procedimento", "1") or "1"
-    proc = ProcedimentoSet(
-        competencia=competencia,
-        numeracao=num,
-        codigo_procedimento=proc_cod,
-        cbo=_fixo(cfg, "cbo", "225265"),
-        quantidade=qtd,
-        codigo_servico=_fixo(cfg, "codigo_servico", "131"),
-        codigo_classificacao=_fixo(cfg, "codigo_classificacao", "003"),
+    cbo = _fixo(cfg, "cbo", "225265")
+    cod_servico = _fixo(cfg, "codigo_servico", "131")
+    cod_class = _fixo(cfg, "codigo_classificacao", "003")
+    glaucoma = cfg.modalidade == MODALIDADE_GLAUCOMA
+    procs: list[ProcedimentoSet] = []
+    for cod in codigos_proc:
+        if glaucoma:
+            servico, classificacao = servico_classificacao_glaucoma(cod)
+        else:
+            servico, classificacao = cod_servico, cod_class
+        procs.append(
+            ProcedimentoSet(
+                competencia=competencia,
+                numeracao=num,
+                codigo_procedimento=cod,
+                cbo=cbo,
+                quantidade=qtd,
+                codigo_servico=servico,
+                codigo_classificacao=classificacao,
+            )
+        )
+    return PacienteSetRecord(
+        corpo=corpo, cid=cid_rec, procedimentos=tuple(procs)
     )
-    return PacienteSetRecord(corpo=corpo, cid=cid_rec, procedimento=proc)
 
 
 def cmd_gerar_set(
@@ -325,7 +399,7 @@ def cmd_gerar_set(
         sigla=_export(cfg, "sigla", "CSMG"),
         cgc=_export(cfg, "cgc", "01192155000210"),
         orgao_destino=_export(cfg, "orgao_destino", "SECRETARIA DE SAUDE"),
-        destino_in=_export(cfg, "destino_in", "M"),
+        destino_in=destino_in_para_modalidade(cfg.modalidade),
         data_geracao=data_geracao_hoje(),
         versao=_export(cfg, "versao", "Versao 04.01"),
     )
@@ -338,7 +412,7 @@ def cmd_gerar_set(
     staging = caminho_staging(cfg)
     staging.write_bytes(blob)
     sugerido = pasta_staging(cfg) / nome_arquivo_set(
-        competencia_lote, _export(cfg, "prefixo_arquivo", "APOFTAL") or "APOFTAL"
+        competencia_lote, cfg.modalidade
     )
     sugerido.write_bytes(blob)
     log.info(

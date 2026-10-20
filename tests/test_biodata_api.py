@@ -10,7 +10,13 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from apac_bot.config import AppConfig, ConfigError, biodata_modo, validate_config
+from apac_bot.config import (
+    MODALIDADE_GLAUCOMA,
+    AppConfig,
+    ConfigError,
+    biodata_modo,
+    validate_config,
+)
 from apac_bot.connectors import build_connector
 from apac_bot.connectors.biodata_api import (
     BiodataApiConnector,
@@ -155,6 +161,14 @@ def test_validate_biodata_exige_planilha_prontuarios(tmp_path: Path):
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
     assert "planilha_prontuarios.caminho" in str(exc.value)
+
+
+def test_validate_biodata_glaucoma_sem_planilha_prontuarios(tmp_path: Path):
+    cfg = _cfg(tmp_path, modo="api")
+    cfg.raw.pop("planilha_prontuarios", None)
+    cfg.raw.setdefault("apac", {})["modalidade"] = MODALIDADE_GLAUCOMA
+    avisos = validate_config(cfg)
+    assert avisos == []
 
 
 def test_validate_api_requires_secrets(tmp_path: Path):

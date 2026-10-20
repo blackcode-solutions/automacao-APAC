@@ -56,13 +56,11 @@ def _cfg(tmp_path: Path) -> AppConfig:
         "export_set": {
             "limite_pacientes": 5,
             "pasta_saida": str(tmp_path / "export_set"),
-            "prefixo_arquivo": "APOFTAL",
             "competencia_padrao": "202609",
             "orgao_origem": "CLINICA DE SERVICOS MEDICOS GE",
             "sigla": "CSMG",
             "cgc": "01192155000210",
             "orgao_destino": "SECRETARIA DE SAUDE",
-            "destino_in": "M",
             "versao": "Versao 04.01",
         },
         "apac": {"paciente_inicio": "PAC 0"},
@@ -203,6 +201,7 @@ def test_save_form_preserva_biodata_e_export_set(tmp_path: Path):
     raw = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert raw["biodata"]["url"] == "https://keep.me"
     assert raw["export_set"]["limite_pacientes"] == 5
-    # CID/serviço/classif ficam só no config (fora da UI) e o merge nao apaga.
+    # CID oculto por modalidade (padrão H250); serviço/classif só no config.
     assert raw["dados_fixos"]["cid_principal"] == "H250"
-    assert "cid_principal" not in DADOS_FIXOS_UI_KEYS
+    assert "cid_principal" in DADOS_FIXOS_UI_KEYS
+    assert "codigo_servico" not in DADOS_FIXOS_UI_KEYS

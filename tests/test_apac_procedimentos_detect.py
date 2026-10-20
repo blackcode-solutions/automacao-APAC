@@ -95,3 +95,24 @@ def test_dt_solicitacao_primeiro_dia_mes_anterior():
     assert _nome_profissional_f1("0RCELIO REZENDE") == "0RCELIO REZENDE"
     assert _nome_profissional_f1("ØRCELIO REZENDE") == "0RCELIO REZENDE"
     assert _nome_profissional_f1("José") == "JOSE"
+
+
+def test_validade_glaucoma_fim_mais_dois_meses():
+    from datetime import date
+
+    from apac_bot.apac import datas_validade_mes_anterior
+
+    inicio, fim = datas_validade_mes_anterior(date(2026, 10, 14), fim_offset_meses=2)
+    assert inicio == "01092026"
+    assert fim == "30112026"
+
+
+def test_validade_glaucoma_virada_de_ano():
+    from datetime import date
+
+    from apac_bot.apac import datas_validade_mes_anterior
+
+    # Em dezembro/2026, base = novembro → fim = janeiro/2027
+    inicio, fim = datas_validade_mes_anterior(date(2026, 12, 5), fim_offset_meses=2)
+    assert inicio == "01112026"
+    assert fim == "31012027"

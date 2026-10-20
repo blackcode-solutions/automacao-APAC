@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from openpyxl import Workbook, load_workbook
 
-from apac_bot.config import AppConfig, config_dir, resolve_path
+from apac_bot.config import MODALIDADE_GLAUCOMA, AppConfig, config_dir, resolve_path
 from apac_bot.models import Lancamento
 from apac_bot.normalize import cell_as_text, normalize_codigo, normalize_numeracao, optional_text
 
@@ -279,7 +279,267 @@ def _linha_oculta(ws, row: int) -> bool:
         return False
 
 
-def load_lancamentos(cfg: AppConfig, planilha_override: Optional[Path] = None) -> SheetValidation:
+ABA_GLAUCOMA_BASE_CONSULTAS = "Base Consultas"
+ABA_GLAUCOMA_TRAT_PREFIX = "trat "
+
+# Abas de faturamento do CENARIO (já trazem Chave/Guia). Relatório bruto não.
+_GLAUCOMA_COLUNAS: dict[str, tuple[str, ...]] = {
+    "prontuario": ("Prontuário", "Prontuario"),
+    "cliente": ("Cliente",),
+    "codigo": (
+        "Código",
+        "Codigo",
+        "Cód./Procedimento",
+        "Cod./Procedimento",
+    ),
+    "associado": ("Associado a", "Associados a", "Associado"),
+    "guia": ("Chave (Guia)", "Guia"),
+    "atendimento": (
+        "Nº Atend.",
+        "N° Atend.",
+        "No Atend.",
+        "Nº Atendimento",
+        "N° Atendimento",
+        "No Atendimento",
+        "Num Atendimento",
+    ),
+}
+
+_RE_CODIGO_ENTRE_PARENTESES = re.compile(r"\((\d+)\)")
+
+
+def extrair_codigos_associados(texto: object) -> list[str]:
+    """Extrai códigos de procedimento entre parênteses na coluna Associado a."""
+    return _RE_CODIGO_ENTRE_PARENTESES.findall(str(texto or ""))
+
+
+def _abas_faturamento_glaucoma(sheetnames: list[str]) -> list[str]:
+    """Base Consultas + abas TRAT * (ordem do arquivo)."""
+    abas: list[str] = []
+    for nome in sheetnames:
+        chave = nome.strip().casefold()
+        if chave == ABA_GLAUCOMA_BASE_CONSULTAS.casefold():
+            abas.append(nome)
+        elif chave.startswith(ABA_GLAUCOMA_TRAT_PREFIX):
+            abas.append(nome)
+    return abas
+
+
+def listar_abas_faturamento_glaucoma(caminho: Path) -> list[str]:
+    """Abas de faturamento do xlsx glaucoma (para o dropdown da UI)."""
+    path = Path(caminho)
+    if not path.is_file():
+        raise SheetError(f"Planilha não encontrada: {path}")
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        return _abas_faturamento_glaucoma(list(wb.sheetnames))
+    finally:
+        wb.close()
+
+
+def _resolver_abas_glaucoma(
+    abas: list[str], aba_escolhida: str
+) -> list[str]:
+    """
+    Uma aba por vez: se escolhida e existir, só ela;
+    se vazia e exatamente uma faturamento, usa essa;
+    se vazia e 2+, erro pedindo seleção na UI.
+    """
+    escolhida = (aba_escolhida or "").strip()
+    if escolhida:
+        lower = {a.casefold(): a for a in abas}
+        hit = lower.get(escolhida.casefold())
+        if hit is None:
+            raise SheetError(
+                f"Aba glaucoma '{escolhida}' não encontrada entre "
+                f"as de faturamento: {abas}"
+            )
+        return [hit]
+    if len(abas) == 1:
+        return abas
+    raise SheetError(
+        "Selecione a aba da planilha glaucoma na UI "
+        f"(há {len(abas)} abas de faturamento: {abas})."
+    )
+
+
+def _indice_coluna_glaucoma(
+    headers: dict[str, int], aliases: tuple[str, ...]
+) -> Optional[int]:
+    for alias in aliases:
+        if alias in headers:
+            return headers[alias]
+    lower = {k.casefold(): v for k, v in headers.items()}
+    for alias in aliases:
+        hit = lower.get(alias.casefold())
+        if hit is not None:
+            return hit
+    return None
+
+
+def _ler_aba_faturamento_glaucoma(
+    ws,
+    *,
+    nome_aba: str,
+    cfg: AppConfig,
+    apenas_ativos: bool,
+    vistas: dict[str, str],
+) -> tuple[list[Lancamento], list[str], list[str], int]:
+    """Lê uma aba Base Consultas / TRAT. Retorna (lancs, erros, avisos, ignorados)."""
+    headers = _header_map(ws, header_row=1)
+    erros: list[str] = []
+    avisos: list[str] = []
+    indices: dict[str, Optional[int]] = {}
+    obrigatorias = ("cliente", "codigo", "prontuario", "guia")
+    for chave in _GLAUCOMA_COLUNAS:
+        indices[chave] = _indice_coluna_glaucoma(headers, _GLAUCOMA_COLUNAS[chave])
+    for chave in obrigatorias:
+        if indices[chave] is None:
+            erros.append(
+                f"Aba '{nome_aba}': coluna obrigatória ausente "
+                f"'{_GLAUCOMA_COLUNAS[chave][0]}'"
+            )
+    if erros:
+        return [], erros, avisos, 0
+
+    regras_num = (cfg.normalizacao.get("numeracao") or {})
+    regras_cod = (cfg.normalizacao.get("codigo") or {})
+    fixos = cfg.dados_fixos
+    lancamentos: list[Lancamento] = []
+    ignorados = 0
+    max_row = ws.max_row or 2
+
+    for row in range(2, max_row + 1):
+        paciente = _cell(ws, row, indices["cliente"])
+        codigo = _cell(ws, row, indices["codigo"])
+        prontuario = _cell(ws, row, indices["prontuario"])
+        guia = _cell(ws, row, indices["guia"])
+        n_atend = _cell(ws, row, indices.get("atendimento"))
+        associado_bruto = _cell(ws, row, indices.get("associado"))
+
+        if not any([paciente, codigo, prontuario, guia, n_atend]):
+            continue
+        # Sem Chave (Guia) não entra no lote (linhas residuais / incompletas).
+        if not guia:
+            continue
+        if apenas_ativos and _linha_oculta(ws, row):
+            ignorados += 1
+            continue
+
+        faltando = []
+        if not paciente:
+            faltando.append("Cliente")
+        if not codigo:
+            faltando.append(_GLAUCOMA_COLUNAS["codigo"][0])
+        if not prontuario:
+            faltando.append("Prontuário")
+        if faltando:
+            erros.append(
+                f"Aba '{nome_aba}' linha {row}: campos ausentes: {', '.join(faltando)}"
+            )
+            continue
+
+        numeracao = guia
+        id_vista = f"{numeracao}|{codigo}"
+        if id_vista in vistas:
+            erros.append(
+                f"Lançamento duplicado Chave (Guia) '{numeracao}' + código "
+                f"'{codigo}' (abas/linhas {vistas[id_vista]} e {nome_aba}:{row})"
+            )
+            continue
+        vistas[id_vista] = f"{nome_aba}:{row}"
+
+        associados = [
+            normalize_codigo(c, regras_cod)
+            for c in extrair_codigos_associados(associado_bruto)
+        ]
+
+        lancamentos.append(
+            Lancamento(
+                clinica_id=cfg.clinica_id,
+                numeracao_original=numeracao,
+                numeracao_apac=normalize_numeracao(numeracao, regras_num),
+                codigo_original=codigo,
+                codigo_apac=normalize_codigo(codigo, regras_cod),
+                auditor="",
+                paciente_nome=paciente,
+                prontuario=optional_text(prontuario),
+                quant="1",
+                competencia=optional_text(fixos.get("competencia")),
+                validade=optional_text(fixos.get("validade")),
+                linha_planilha=row,
+                codigos_associados=associados,
+            )
+        )
+
+    return lancamentos, erros, avisos, ignorados
+
+
+def _load_lancamentos_glaucoma(
+    cfg: AppConfig, planilha_override: Optional[Path] = None
+) -> SheetValidation:
+    """
+    Leitor do CENARIO glaucoma: uma aba Base Consultas / TRAT por vez
+    (planilha.aba_glaucoma). Número da APAC = Chave (Guia).
+    """
+    base = config_dir(cfg)
+    caminho = planilha_override or resolve_path(base, cfg.planilha_caminho)
+    if not caminho.is_file():
+        raise SheetError(f"Planilha não encontrada: {caminho}")
+
+    apenas_ativos = cfg.planilha_apenas_ativos
+    wb = load_workbook(caminho, data_only=True, read_only=not apenas_ativos)
+    try:
+        abas = _abas_faturamento_glaucoma(list(wb.sheetnames))
+        if not abas:
+            raise SheetError(
+                "Nenhuma aba de faturamento glaucoma encontrada "
+                f"(esperado 'Base Consultas' e/ou 'TRAT …'). "
+                f"Disponíveis: {wb.sheetnames}"
+            )
+        abas = _resolver_abas_glaucoma(abas, cfg.planilha_aba_glaucoma)
+
+        erros: list[str] = []
+        avisos: list[str] = []
+        lancamentos: list[Lancamento] = []
+        vistas: dict[str, str] = {}
+        ignorados_filtro = 0
+
+        for nome_aba in abas:
+            ws = wb[nome_aba]
+            lacs, errs, avis, ign = _ler_aba_faturamento_glaucoma(
+                ws,
+                nome_aba=nome_aba,
+                cfg=cfg,
+                apenas_ativos=apenas_ativos,
+                vistas=vistas,
+            )
+            lancamentos.extend(lacs)
+            erros.extend(errs)
+            avisos.extend(avis)
+            ignorados_filtro += ign
+
+        if apenas_ativos and ignorados_filtro:
+            avisos.append(
+                f"Apenas ativos: {len(lancamentos)} lançamento(s) visível(is); "
+                f"{ignorados_filtro} linha(s) oculta(s) ignorada(s) pelo filtro do Excel."
+            )
+        if not lancamentos and not erros:
+            erros.append(
+                "Planilha glaucoma sem lançamentos na aba selecionada "
+                f"({abas[0]})."
+            )
+        return SheetValidation(lancamentos, erros, avisos)
+    finally:
+        wb.close()
+
+
+def load_lancamentos(
+    cfg: AppConfig, planilha_override: Optional[Path] = None
+) -> SheetValidation:
+    if cfg.modalidade == MODALIDADE_GLAUCOMA:
+        return _load_lancamentos_glaucoma(cfg, planilha_override)
+
     base = config_dir(cfg)
     caminho = planilha_override or resolve_path(base, cfg.planilha_caminho)
     if not caminho.is_file():
@@ -399,10 +659,12 @@ def load_lancamentos(cfg: AppConfig, planilha_override: Optional[Path] = None) -
 
     wb.close()
 
-    mapa = carregar_mapa_prontuario(cfg)
-    if mapa:
-        for lanc in lancamentos:
-            enriquecer_prontuario(lanc, mapa)
+    # Glaucoma: prontuário já vem na planilha do lote — não usa 2ª planilha.
+    if cfg.modalidade != MODALIDADE_GLAUCOMA:
+        mapa = carregar_mapa_prontuario(cfg)
+        if mapa:
+            for lanc in lancamentos:
+                enriquecer_prontuario(lanc, mapa)
 
     return SheetValidation(lancamentos, erros, avisos)
 
