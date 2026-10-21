@@ -12,7 +12,7 @@ from typing import Optional
 from apac_bot.config import AppConfig, config_dir, load_config, resolve_path
 from apac_bot.models import EstadoLancamento, Lancamento
 from apac_bot.progress import ProgressRecord, ProgressStore
-from apac_bot.sheet import SheetError, listar_lancamentos_a_partir, load_lancamentos
+from apac_bot.sheet import SheetError, listar_lancamentos_a_partir
 
 STATUS_LABELS: dict[EstadoLancamento, str] = {
     EstadoLancamento.CONCLUIDO: "Concluído",
@@ -229,19 +229,9 @@ def _fila_para_painel(
 ) -> list[Lancamento]:
     """
     Fila exibida no painel: a partir de paciente_inicio se configurado;
-    senão todos os lançamentos da planilha (preview ao anexar).
+    senão todos os lançamentos ativos (mesmo fallback de listar_lancamentos_a_partir).
     """
-    nome_alvo = (cfg.apac.get("paciente_inicio") or "").strip()
-    if nome_alvo:
-        return listar_lancamentos_a_partir(cfg, planilha_override)
-    result = load_lancamentos(cfg, planilha_override)
-    if not result.ok:
-        raise SheetError(
-            "Falha ao carregar planilha: " + "; ".join(result.erros[:5])
-        )
-    if not result.lancamentos:
-        raise SheetError("Planilha sem lançamentos ativos.")
-    return list(result.lancamentos)
+    return listar_lancamentos_a_partir(cfg, planilha_override)
 
 
 def load_lote_snapshot(

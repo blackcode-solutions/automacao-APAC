@@ -10,7 +10,12 @@ from apac_bot.connectors.biodata import BiodataMappingError
 from apac_bot.connectors.biodata_api import BiodataApiError
 from apac_bot.logging_safe import setup_logging, short_id
 from apac_bot.models import EstadoLancamento, Lancamento, PacienteDados
-from apac_bot.normalize import nascimento_ddmmaaaa, sexo_para_apac, tem_cpf_valido
+from apac_bot.normalize import (
+    nascimento_ddmmaaaa,
+    sexo_para_apac,
+    tem_cns_valido,
+    tem_cpf_valido,
+)
 from apac_bot.progress import ProgressStore
 from apac_bot.sheet import SheetError, load_lancamentos, nome_mae_valido
 
@@ -26,16 +31,16 @@ def validar_dados_obrigatorios_apac(
     paciente_nome: str,
 ) -> Optional[str]:
     """
-    Pré-check antes do Insert no Magnético.
-    Retorna None se CPF, nome da mãe, nascimento e sexo estiverem ok;
-    senão string com os campos faltando (ex.: "faltam: cpf, nome_mae").
+    Pré-check antes do Insert / gerar-set.
+    Retorna None se (CPF ou CNS), nome da mãe, nascimento e sexo estiverem ok;
+    senão string com os campos faltando (ex.: "faltam: cpf/cns, nome_mae").
     """
     if paciente is None:
-        return "faltam: cpf, nome_mae, nascimento, sexo"
+        return "faltam: cpf/cns, nome_mae, nascimento, sexo"
 
     faltam: list[str] = []
-    if not tem_cpf_valido(paciente.cpf):
-        faltam.append("cpf")
+    if not tem_cpf_valido(paciente.cpf) and not tem_cns_valido(paciente.cns):
+        faltam.append("cpf/cns")
     if not nome_mae_valido(paciente.nome_mae, paciente_nome):
         faltam.append("nome_mae")
     if not nascimento_ddmmaaaa(paciente.nascimento):

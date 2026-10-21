@@ -2,9 +2,21 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import date
 from typing import Any, Optional
 
 from apac_bot.tipos_logradouro import tipos_logradouro_por_tamanho
+
+
+def ymd_valido(ano: int, mes: int, dia: int) -> bool:
+    """True se data de calendário válida e ano plausível para nascimento (1900–2100)."""
+    if ano < 1900 or ano > 2100:
+        return False
+    try:
+        date(ano, mes, dia)
+        return True
+    except ValueError:
+        return False
 
 
 def cell_as_text(value: Any) -> str:
@@ -56,6 +68,22 @@ def optional_text(value: Optional[str]) -> Optional[str]:
     return text if text else None
 
 
+# Fallback único quando BIODATA não tem CEP válido (SET e Magnético).
+CEP_PADRAO_APAC = "65010000"
+CEPS_INVALIDOS_APAC = frozenset({"65000000", "65056500"})
+
+
+def cep_para_apac(valor: Optional[str]) -> str:
+    """CEP de 8 dígitos da origem, ou CEP_PADRAO_APAC se ausente/inválido."""
+    digitos = "".join(ch for ch in str(valor or "") if ch.isdigit())
+    if len(digitos) >= 8:
+        cep = digitos[:8]
+        if cep in CEPS_INVALIDOS_APAC:
+            return CEP_PADRAO_APAC
+        return cep
+    return CEP_PADRAO_APAC
+
+
 def cpf_digitos(value: Optional[str]) -> str:
     """Retorna só dígitos do CPF (vazio se inválido/ausente)."""
     if not value:
@@ -66,6 +94,32 @@ def cpf_digitos(value: Optional[str]) -> str:
 def tem_cpf_valido(value: Optional[str]) -> bool:
     """True se houver 11 dígitos após limpar máscara."""
     return len(cpf_digitos(value)) == 11
+
+
+def cns_digitos(value: Optional[str]) -> str:
+    """Retorna só dígitos do CNS (vazio se ausente)."""
+    if not value:
+        return ""
+    return "".join(ch for ch in str(value) if ch.isdigit())
+
+
+def tem_cns_valido(value: Optional[str]) -> bool:
+    """True se houver 15 dígitos após limpar máscara (campo layout INTERNO)."""
+    return len(cns_digitos(value)) == 15
+
+
+def identidade_paciente_set(
+    cpf: Optional[str], cns: Optional[str]
+) -> tuple[str, str]:
+    """
+    CPF e CNS do paciente são mutuamente exclusivos no SET.
+    Prioridade CPF: se válido, CNS sai vazio; senão, usa CNS se válido.
+    """
+    if tem_cpf_valido(cpf):
+        return cpf_digitos(cpf), ""
+    if tem_cns_valido(cns):
+        return "", cns_digitos(cns)
+    return "", ""
 
 
 def sexo_para_apac(value: Optional[str]) -> Optional[str]:
@@ -109,10 +163,14 @@ def nascimento_ddmmaaaa(value: Optional[str]) -> Optional[str]:
     digits = "".join(ch for ch in s if ch.isdigit())
     if len(digits) != 8:
         return None
-    # YYYYMMDD vs DDMMAAAA
-    if digits[:2] in {"19", "20"}:
-        return digits[6:8] + digits[4:6] + digits[0:4]
-    return digits
+    # Preferir DDMMAAAA (origem BR); senão AAAAMMDD → DDMMAAAA.
+    d, m, y = int(digits[0:2]), int(digits[2:4]), int(digits[4:8])
+    if ymd_valido(y, m, d):
+        return digits
+    y2, m2, d2 = int(digits[0:4]), int(digits[4:6]), int(digits[6:8])
+    if ymd_valido(y2, m2, d2):
+        return f"{digits[6:8]}{digits[4:6]}{digits[0:4]}"
+    return None
 
 
 def _sem_acento_upper(texto: str) -> str:

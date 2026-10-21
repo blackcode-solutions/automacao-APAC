@@ -108,6 +108,17 @@ def test_listar_lancamentos_a_partir_meio_da_fila(cfg_tmp: AppConfig):
     assert len(fila) == len(nomes) - 1
 
 
+def test_listar_lancamentos_a_partir_sem_paciente_inicio_retorna_todos(
+    cfg_tmp: AppConfig,
+):
+    todos = load_lancamentos(cfg_tmp).lancamentos
+    assert len(todos) >= 1
+    cfg_tmp.raw.setdefault("apac", {})["paciente_inicio"] = ""
+    fila = listar_lancamentos_a_partir(cfg_tmp)
+    assert [l.paciente_nome for l in fila] == [l.paciente_nome for l in todos]
+    assert fila[0].paciente_nome == todos[0].paciente_nome
+
+
 def test_listar_lancamentos_a_partir_paciente_inexistente(cfg_tmp: AppConfig):
     cfg_tmp.raw.setdefault("apac", {})["paciente_inicio"] = "NOME QUE NAO EXISTE"
     with pytest.raises(SheetError, match="não encontrado"):

@@ -48,18 +48,33 @@ def test_validar_ok():
     assert validar_dados_obrigatorios_apac(_paciente_ok(), "MARIA SILVA") is None
 
 
+def test_validar_ok_so_cns():
+    p = _paciente_ok(cpf=None, cns="708107527671032")
+    assert validar_dados_obrigatorios_apac(p, "MARIA SILVA") is None
+
+
+def test_validar_ok_cpf_com_cns_tambem():
+    p = _paciente_ok(cns="708107527671032")
+    assert validar_dados_obrigatorios_apac(p, "MARIA SILVA") is None
+
+
 def test_validar_paciente_none():
     motivo = validar_dados_obrigatorios_apac(None, "X")
     assert motivo is not None
-    assert "cpf" in motivo
+    assert "cpf/cns" in motivo
     assert "nome_mae" in motivo
     assert "nascimento" in motivo
     assert "sexo" in motivo
 
 
-def test_validar_falta_cpf():
-    p = _paciente_ok(cpf=None)
-    assert validar_dados_obrigatorios_apac(p, "MARIA SILVA") == "faltam: cpf"
+def test_validar_falta_cpf_e_cns():
+    p = _paciente_ok(cpf=None, cns=None)
+    assert validar_dados_obrigatorios_apac(p, "MARIA SILVA") == "faltam: cpf/cns"
+
+
+def test_validar_cns_incompleto_sem_cpf():
+    p = _paciente_ok(cpf=None, cns="123")
+    assert validar_dados_obrigatorios_apac(p, "MARIA SILVA") == "faltam: cpf/cns"
 
 
 def test_validar_falta_mae():
@@ -83,9 +98,9 @@ def test_validar_falta_sexo():
 
 
 def test_validar_varios_faltando():
-    p = _paciente_ok(cpf="", nascimento="", sexo="")
+    p = _paciente_ok(cpf="", cns="", nascimento="", sexo="")
     motivo = validar_dados_obrigatorios_apac(p, "MARIA SILVA")
-    assert motivo == "faltam: cpf, nascimento, sexo"
+    assert motivo == "faltam: cpf/cns, nascimento, sexo"
 
 
 def test_buscar_paciente_ok_com_mock():

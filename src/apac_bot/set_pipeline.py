@@ -21,10 +21,10 @@ from apac_bot.logging_safe import setup_logging, short_id
 from apac_bot.models import EstadoLancamento, Lancamento, PacienteDados
 from apac_bot.normalize import (
     abreviar_nome_apac,
-    cpf_digitos,
+    cep_para_apac,
+    identidade_paciente_set,
     nascimento_ddmmaaaa,
     sexo_para_apac,
-    tem_cpf_valido,
 )
 from apac_bot.pipeline import (
     PipelineError,
@@ -52,6 +52,8 @@ from apac_bot.sheet import SheetError, listar_lancamentos_a_partir, nome_mae_val
 log = setup_logging()
 
 STAGING_NAME = "lote_atual.SET"
+BAIRRO_PADRAO_SET = "CENTRO"
+NUMERO_PADRAO_SET = "SN"
 
 # (codigo_servico, codigo_classificacao) por procedimento — só Glaucoma.
 # Códigos ausentes → ("", "") na linha 13.
@@ -140,8 +142,10 @@ def montar_record_paciente(
     ini, fim = datas_competencia(
         competencia, fim_offset_meses=fim_offset_meses(cfg.modalidade)
     )
+    # Encerramento (Magnético 010082): sempre último dia do mês da competência.
+    _, fim_competencia = datas_competencia(competencia, fim_offset_meses=0)
     num = numeracao_13(lanc.numeracao_original)
-    cpf = cpf_digitos(pac.cpf)
+    cpf, cns_pac = identidade_paciente_set(pac.cpf, pac.cns)
     sexo = sexo_para_apac(pac.sexo) or ""
     nasc = nascimento_aaaammdd(
         nascimento_ddmmaaaa(pac.nascimento) or pac.nascimento
@@ -150,12 +154,6 @@ def montar_record_paciente(
     mae = abreviar_nome_apac(pac.nome_mae or "", 30)
     if not nome_mae_valido(pac.nome_mae, lanc.paciente_nome):
         raise SetLayoutError("nome_mae invalido")
-
-    cid = (
-        "H401"
-        if cfg.modalidade == MODALIDADE_GLAUCOMA
-        else _fixo(cfg, "cid_principal", "H250")
-    )
 
     def _so_digitos(valor: object) -> str:
         return "".join(ch for ch in str(valor or "") if ch.isdigit())
@@ -169,7 +167,17 @@ def montar_record_paciente(
             for dig in (_so_digitos(c) for c in lanc.codigos_associados)
             if dig
         ]
-        codigos_proc = [principal] + associados
+        # Ordem SET: 1º associado → Código → demais associados.
+        # Sem associados: só o Código. Corpo 14 usa codigos_proc[0].
+        if associados:
+            codigos_proc = [associados[0], principal] + associados[1:]
+        else:
+            codigos_proc = [principal]
+        # 1 proc → 12/H400; 2+ → 15/H401
+        if len(codigos_proc) >= 2:
+            cid, motivo_saida = "H401", "15"
+        else:
+            cid, motivo_saida = "H400", "12"
     else:
         proc_cod = _fixo(cfg, "codigo_procedimento") or _so_digitos(
             lanc.codigo_apac
@@ -177,19 +185,26 @@ def montar_record_paciente(
         if not proc_cod:
             raise SetLayoutError("codigo_procedimento ausente")
         codigos_proc = [proc_cod]
+        cid = _fixo(cfg, "cid_principal", "H250")
+        motivo_saida = "12"
     proc_cod = codigos_proc[0]
 
     cnes = _fixo(cfg, "cnes_executante") or _fixo(cfg, "cnes_solicitante")
     cnes_sol = _fixo(cfg, "cnes_solicitante") or cnes
     mun = _fixo(cfg, "municipio_ibge_padrao", "211230")
-    sem_cpf = "N" if tem_cpf_valido(cpf) else "S"
+    sem_cpf = "N" if cpf else "S"
     tipo_atend = (
         "07"
         if cfg.modalidade == MODALIDADE_GLAUCOMA
         else _fixo(cfg, "tipo_atendimento", "00")
     )
     tipo_apac = "1" if cfg.modalidade == MODALIDADE_GLAUCOMA else "3"
-    motivo_saida = "15" if cfg.modalidade == MODALIDADE_GLAUCOMA else "12"
+    numero_bruto = (pac.numero or "").strip()
+    numero_set = numero_bruto[:5] if numero_bruto else NUMERO_PADRAO_SET
+    bairro_bruto = (pac.bairro or "").strip()
+    bairro_set = (
+        abreviar_nome_apac(bairro_bruto, 30) if bairro_bruto else BAIRRO_PADRAO_SET
+    )
 
     corpo = CorpoApacSet(
         competencia=competencia,
@@ -204,24 +219,22 @@ def montar_record_paciente(
         nome=nome,
         nome_mae=mae,
         logradouro=_logradouro_limpo(pac),
-        numero=(pac.numero or "")[:5],
+        numero=numero_set,
         complemento=(pac.complemento or "")[:10],
-        cep="".join(ch for ch in (pac.cep or "") if ch.isdigit())[:8],
+        cep=cep_para_apac(pac.cep),
         municipio_ibge=mun,
         nascimento=nasc,
         sexo=sexo,
         medico_responsavel=_fixo(cfg, "medico_solicitante_nome"),
         codigo_procedimento=proc_cod,
         motivo_saida=motivo_saida,
-        data_obito_alta=fim,
+        data_obito_alta=fim_competencia,
         autorizador_nome=_fixo(cfg, "autorizador_nome"),
-        cns_paciente="".join(ch for ch in (pac.cns or "") if ch.isdigit()),
+        cns_paciente=cns_pac,
         cns_medico=_fixo(cfg, "medico_solicitante_cns"),
         cns_autorizador=_fixo(cfg, "autorizador_cns"),
         cid_causas="",
-        prontuario="".join(ch for ch in str(lanc.prontuario or "") if ch.isdigit())[
-            :10
-        ],
+        prontuario="",
         cnes_solicitante=cnes_sol,
         data_solicitacao=ini,
         data_autorizacao=ini,
@@ -233,7 +246,7 @@ def montar_record_paciente(
         nacionalidade=_fixo(cfg, "nacionalidade", "010"),
         etnia="",
         codigo_logradouro=_fixo(cfg, "codigo_logradouro", "008"),
-        bairro=abreviar_nome_apac(pac.bairro or "", 30),
+        bairro=bairro_set,
         ddd="",
         telefone="",
         email="",

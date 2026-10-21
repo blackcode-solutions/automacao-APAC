@@ -142,7 +142,7 @@ def test_cep_para_digitar_usa_padrao_sem_origem():
     lanc = _lanc()
     lanc.paciente = PacienteDados(nome="SEM CEP")
     assert a._cep_para_digitar_apac(lanc) == CEP_PADRAO_APAC
-    assert CEP_PADRAO_APAC == "65020070"
+    assert CEP_PADRAO_APAC == "65010000"
 
 
 def test_refrescar_usa_cadastro_aberto_sem_buscar_prontuario():

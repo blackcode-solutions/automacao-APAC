@@ -210,14 +210,13 @@ def listar_lancamentos_a_partir(
     planilha_override: Optional[Path] = None,
 ) -> list[Lancamento]:
     """
-    Lancamentos ativos a partir de apac.paciente_inicio (nome exato, case-insensitive),
-    inclusive ate o fim da planilha.
+    Lançamentos ativos a partir de apac.paciente_inicio (nome exato, case-insensitive),
+    inclusive até o fim da planilha.
+
+    Se paciente_inicio estiver vazio/ausente, retorna todos os lançamentos ativos
+    (partida no primeiro paciente com nome válido da planilha).
     """
     nome_alvo = (cfg.apac.get("paciente_inicio") or "").strip()
-    if not nome_alvo:
-        raise SheetError(
-            "apac.paciente_inicio não configurado — defina o nome do primeiro paciente."
-        )
 
     result = load_lancamentos(cfg, planilha_override)
     if not result.ok:
@@ -226,6 +225,9 @@ def listar_lancamentos_a_partir(
         )
     if not result.lancamentos:
         raise SheetError("Planilha sem lançamentos ativos.")
+
+    if not nome_alvo:
+        return list(result.lancamentos)
 
     alvo_norm = nome_alvo.casefold()
     idx: Optional[int] = None
@@ -247,7 +249,8 @@ def resolver_lancamento_inicio(
     planilha_override: Optional[Path] = None,
 ) -> Lancamento:
     """
-    Localiza o lançamento de partida por apac.paciente_inicio (nome exato, case-insensitive).
+    Localiza o lançamento de partida: por apac.paciente_inicio se configurado;
+    senão o primeiro lançamento ativo da planilha.
     """
     return listar_lancamentos_a_partir(cfg, planilha_override)[0]
 

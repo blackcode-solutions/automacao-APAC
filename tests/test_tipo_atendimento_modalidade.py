@@ -69,6 +69,8 @@ def test_tipo_atendimento_padrao_usa_config_00():
     assert rec.corpo.tipo_apac == "3"
     assert rec.corpo.motivo_saida == "12"
     assert rec.cid.cid_principal == "H250"
+    assert rec.corpo.cid_causas == ""
+    assert rec.corpo.prontuario == ""
 
 
 def test_tipo_atendimento_glaucoma_forca_07():
@@ -77,15 +79,27 @@ def test_tipo_atendimento_glaucoma_forca_07():
     )
     assert rec.corpo.tipo_atendimento == "07"
     assert rec.corpo.tipo_apac == "1"
-    assert rec.corpo.motivo_saida == "15"
-    assert rec.cid.cid_principal == "H401"
+    # 1 procedimento → 12 / H400
+    assert rec.corpo.motivo_saida == "12"
+    assert rec.cid.cid_principal == "H400"
+    assert rec.corpo.cid_causas == ""
+    assert rec.corpo.prontuario == ""
 
 
-def test_cid_principal_glaucoma_ignora_json_h250():
+def test_glaucoma_data_obito_alta_mes_competencia_nao_fim_validade():
+    """Magnético 010082: encerramento no mês da competência; validade +2."""
+    rec = montar_record_paciente(
+        _cfg(MODALIDADE_GLAUCOMA), _lanc(), competencia="202609"
+    )
+    assert rec.corpo.data_fim_val == "20261130"
+    assert rec.corpo.data_obito_alta == "20260930"
+
+
+def test_cid_principal_glaucoma_um_proc_ignora_json_h250():
     cfg = _cfg(MODALIDADE_GLAUCOMA)
     assert cfg.raw["dados_fixos"]["cid_principal"] == "H250"
     rec = montar_record_paciente(cfg, _lanc(), competencia="202609")
-    assert rec.cid.cid_principal == "H401"
+    assert rec.cid.cid_principal == "H400"
 
 
 def test_tipo_apac_glaucoma_ignora_json_3():
@@ -102,11 +116,17 @@ def test_tipo_apac_padrao_ignora_json_1():
     assert rec.corpo.tipo_apac == "3"
 
 
-def test_motivo_saida_glaucoma_ignora_json_12():
+def test_motivo_saida_cid_glaucoma_multi_proc_ignora_json():
+    """2+ procedimentos → 15/H401 mesmo se JSON tiver 12/H250."""
     cfg = _cfg(MODALIDADE_GLAUCOMA)
     cfg.raw["dados_fixos"]["motivo_saida"] = "12"
-    rec = montar_record_paciente(cfg, _lanc(), competencia="202609")
+    cfg.raw["dados_fixos"]["cid_principal"] = "H250"
+    lanc = _lanc()
+    lanc.codigos_associados = ["0303050187"]
+    rec = montar_record_paciente(cfg, lanc, competencia="202609")
+    assert len(rec.procedimentos) >= 2
     assert rec.corpo.motivo_saida == "15"
+    assert rec.cid.cid_principal == "H401"
 
 
 def test_motivo_saida_padrao_ignora_json_15():
@@ -125,12 +145,26 @@ def test_glaucoma_procedimentos_da_planilha_com_associados():
     lanc.codigo_apac = "0303050160"
     lanc.codigos_associados = ["0303050187", "0303050195"]
     rec = montar_record_paciente(cfg, lanc, competencia="202609")
-    assert rec.corpo.codigo_procedimento == "0303050160"
+    # Ordem: 1º associado → Código → demais associados; corpo 14 = 1º associado.
+    assert rec.corpo.codigo_procedimento == "0303050187"
     assert [p.codigo_procedimento for p in rec.procedimentos] == [
-        "0303050160",
         "0303050187",
+        "0303050160",
         "0303050195",
     ]
+    assert rec.corpo.motivo_saida == "15"
+    assert rec.cid.cid_principal == "H401"
+
+
+def test_glaucoma_um_procedimento_motivo_12_cid_h400():
+    cfg = _cfg(MODALIDADE_GLAUCOMA)
+    lanc = _lanc()
+    lanc.codigo_apac = "0303050012"
+    lanc.codigos_associados = []
+    rec = montar_record_paciente(cfg, lanc, competencia="202609")
+    assert len(rec.procedimentos) == 1
+    assert rec.corpo.motivo_saida == "12"
+    assert rec.cid.cid_principal == "H400"
 
 
 def test_padrao_continua_usando_codigo_fixo():
@@ -162,8 +196,8 @@ def test_glaucoma_servico_classificacao_por_procedimento():
         for p in rec.procedimentos
     ]
     assert pares == [
-        ("0303050012", "131", "002"),
         ("0303050187", "", ""),
+        ("0303050012", "131", "002"),
         ("0301010102", "131", "001"),
         ("0303050160", "", ""),
     ]

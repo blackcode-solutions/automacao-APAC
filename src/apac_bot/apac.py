@@ -137,7 +137,9 @@ from apac_bot.logging_safe import setup_logging
 from apac_bot.models import EstadoLancamento, Lancamento
 from apac_bot.normalize import (
     APAC_MAX_NOME,
+    CEP_PADRAO_APAC,
     abreviar_nome_apac,
+    cep_para_apac,
     nascimento_ddmmaaaa,
     sexo_para_apac,
     tipo_logradouro_do_endereco,
@@ -288,8 +290,6 @@ def refrescar_paciente_biodata(connector, lanc: Lancamento) -> None:
 
 DEFAULT_APAC_EXE = Path(r"C:\APAC\APAC.exe")
 APAC_PROCESS_NAME = "APAC.exe"
-# Fallback quando BIODATA nao tem CEP (8 digitos) — evita Tab-pular e foco preso.
-CEP_PADRAO_APAC = "65020070"
 # APAC Magnético é console: a janela visível costuma ser do Windows Terminal / conhost
 HOST_WINDOW_PROCESS_NAMES = {
     "apac.exe",
@@ -2355,15 +2355,16 @@ class ApacAutomator:
         CEP do BIODATA (8 digitos) ou CEP_PADRAO_APAC se ausente/invalido.
         """
         origem = self._valor_biodata_ou_refrescar(lanc, "cep", rotulo="CEP")
-        digitos = "".join(ch for ch in (origem or "") if ch.isdigit())
-        if len(digitos) >= 8:
-            return digitos[:8]
-        log.warning(
-            "CEP ausente/invalido na origem para %s — usando padrao %s",
-            lanc.paciente_nome,
-            CEP_PADRAO_APAC,
-        )
-        return CEP_PADRAO_APAC
+        digita = cep_para_apac(origem)
+        if digita == CEP_PADRAO_APAC:
+            digitos = "".join(ch for ch in (origem or "") if ch.isdigit())
+            if len(digitos) < 8:
+                log.warning(
+                    "CEP ausente/invalido na origem para %s — usando padrao %s",
+                    lanc.paciente_nome,
+                    CEP_PADRAO_APAC,
+                )
+        return digita
 
     def aceitar_cep_se_preenchido(self, lanc: Lancamento) -> None:
         """

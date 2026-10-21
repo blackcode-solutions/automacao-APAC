@@ -11,6 +11,7 @@ from datetime import date, datetime
 from typing import Optional, Sequence
 
 from apac_bot.config import MODALIDADE_GLAUCOMA, normalizar_modalidade_cfg
+from apac_bot.normalize import ymd_valido
 
 LINE_ENDING = b"\r\n"
 EOF_SUB = b"\x1a"
@@ -97,10 +98,14 @@ def nascimento_aaaammdd(valor: Optional[str]) -> str:
     s = str(valor).strip()
     digits = "".join(ch for ch in s if ch.isdigit())
     if len(digits) == 8:
-        if digits[:2] in {"19", "20"}:
+        # Preferir DDMMAAAA (origem BR); senão já AAAAMMDD.
+        d, m, y = int(digits[0:2]), int(digits[2:4]), int(digits[4:8])
+        if ymd_valido(y, m, d):
+            return f"{digits[4:8]}{digits[2:4]}{digits[0:2]}"
+        y2, m2, d2 = int(digits[0:4]), int(digits[4:6]), int(digits[6:8])
+        if ymd_valido(y2, m2, d2):
             return digits
-        # DDMMAAAA
-        return digits[4:8] + digits[2:4] + digits[0:2]
+        raise SetLayoutError(f"nascimento invalido: {valor!r}")
     for sep in ("/", "-", "."):
         if sep in s:
             parts = [p.strip() for p in s.split(sep) if p.strip()]
@@ -112,6 +117,8 @@ def nascimento_aaaammdd(valor: Optional[str]) -> str:
                     d, m, y = a.zfill(2), b.zfill(2), c
                     if len(y) == 2:
                         y = ("20" if int(y) < 50 else "19") + y
+                if not ymd_valido(int(y), int(m), int(d)):
+                    raise SetLayoutError(f"nascimento invalido: {valor!r}")
                 return f"{y}{m}{d}"
     raise SetLayoutError(f"nascimento invalido: {valor!r}")
 
