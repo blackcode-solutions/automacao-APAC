@@ -4,8 +4,8 @@ import io
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
-from urllib.error import HTTPError
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -21,6 +21,7 @@ from apac_bot.connectors import build_connector
 from apac_bot.connectors.biodata_api import (
     BiodataApiConnector,
     BiodataApiError,
+    DEFAULT_INTERVALO_MS,
     paciente_from_api_row,
     password_sha512_hex,
     sha512_hex,
@@ -48,6 +49,9 @@ def _cfg(tmp_path: Path, *, modo: str | None = "api", api: dict | None = None) -
             "param_nome": "strCliente",
             "paginacao_nome": "0,20",
             "authorization_prefix": "",
+            # Testes unitários: sem throttle (exceto os que testam intervalo).
+            "intervalo_ms": 0,
+            "retry_rede": 3,
         }
     raw = {
         "clinica_id": "clinica_teste",
@@ -293,3 +297,75 @@ def test_ler_cadastro_aberto_reconsulta(tmp_path: Path):
     again = conn.ler_cadastro_aberto()
     assert again is not None
     assert again.id_paciente == "1991955"
+
+
+def test_throttle_aguarda_intervalo_entre_requests(tmp_path: Path):
+    cfg = _cfg(tmp_path, modo="api")
+    cfg.raw["biodata"]["api"]["intervalo_ms"] = DEFAULT_INTERVALO_MS
+    sleeps: list[float] = []
+
+    def opener(request: Any, timeout: float = 0):
+        if "/autenticar" in request.full_url:
+            return _FakeResp({"token": "t"})
+        return _FakeResp(_paciente_json())
+
+    mono = {"t": 1000.0}
+
+    def fake_monotonic() -> float:
+        return mono["t"]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        mono["t"] += seconds
+
+    with (
+        patch("apac_bot.connectors.biodata_api.time.monotonic", fake_monotonic),
+        patch("apac_bot.connectors.biodata_api.time.sleep", fake_sleep),
+    ):
+        conn = BiodataApiConnector(cfg, opener=opener)
+        conn.buscar_por_prontuario("1991955")
+        # Avança pouco o relógio — 2ª chamada deve completar o intervalo.
+        mono["t"] += 0.05
+        conn.buscar_por_prontuario("1991955")
+
+    expected = DEFAULT_INTERVALO_MS / 1000.0 - 0.05
+    assert any(abs(s - expected) < 0.02 for s in sleeps)
+
+
+def test_retry_rede_sucesso_apos_falhas(tmp_path: Path):
+    cfg = _cfg(tmp_path, modo="api")
+    cfg.raw["biodata"]["api"]["retry_rede"] = 3
+    attempts = {"n": 0}
+
+    def opener(request: Any, timeout: float = 0):
+        if "/autenticar" in request.full_url:
+            return _FakeResp({"token": "t"})
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise URLError(OSError(10054, "connection reset"))
+        return _FakeResp(_paciente_json())
+
+    with patch("apac_bot.connectors.biodata_api.time.sleep", return_value=None):
+        conn = BiodataApiConnector(cfg, opener=opener)
+        p = conn.buscar_por_prontuario("1991955")
+    assert p is not None
+    assert attempts["n"] == 3
+
+
+def test_retry_rede_esgota_e_levanta(tmp_path: Path):
+    cfg = _cfg(tmp_path, modo="api")
+    cfg.raw["biodata"]["api"]["retry_rede"] = 3
+    attempts = {"n": 0}
+
+    def opener(request: Any, timeout: float = 0):
+        if "/autenticar" in request.full_url:
+            return _FakeResp({"token": "t"})
+        attempts["n"] += 1
+        raise URLError(OSError(10054, "connection reset"))
+
+    with patch("apac_bot.connectors.biodata_api.time.sleep", return_value=None):
+        conn = BiodataApiConnector(cfg, opener=opener)
+        with pytest.raises(BiodataApiError, match="Falha de rede"):
+            conn.buscar_por_prontuario("1991955")
+    # 1 tentativa inicial + 3 retries = 4
+    assert attempts["n"] == 4

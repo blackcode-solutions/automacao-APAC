@@ -8,7 +8,9 @@
       "id_sac": 91,
       "param_nome": "strCliente",
       "paginacao_nome": "0,20",
-      "authorization_prefix": "Bearer"
+      "authorization_prefix": "Bearer",
+      "intervalo_ms": 2500,
+      "retry_rede": 3
     },
     "url": "https://exemplo.biodata.local/login",
     "user_data_dir": "browser_profile",

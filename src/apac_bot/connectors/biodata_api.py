@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -27,6 +28,18 @@ DEFAULT_PAGINACAO_ID = "0,1"
 DEFAULT_PAGINACAO_NOME = "0,20"
 DEFAULT_AUTH_PREFIX = "Bearer"
 HTTP_TIMEOUT_S = 30
+DEFAULT_INTERVALO_MS = 2500
+DEFAULT_RETRY_REDE = 3
+RETRY_BACKOFF_BASE_S = 0.5
+# WinError: 10054 connection reset, 10053 aborted, 10060 timed out
+_WINERRORS_REDE = frozenset({10054, 10053, 10060})
+_ERRNOS_REDE = frozenset(
+    {
+        errno.ECONNRESET,
+        errno.ETIMEDOUT,
+        getattr(errno, "ECONNABORTED", 103),
+    }
+)
 
 
 class BiodataApiError(Exception):
@@ -94,6 +107,29 @@ def _rows_from_listar_payload(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _int_config(valor: Any, default: int, *, minimo: int = 0) -> int:
+    try:
+        n = int(valor)
+    except (TypeError, ValueError):
+        return default
+    return max(minimo, n)
+
+
+def _eh_falha_rede(exc: BaseException) -> bool:
+    """True para erros transitórios de rede (reset, timeout, etc.)."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return True
+    if isinstance(exc, OSError):
+        win = getattr(exc, "winerror", None)
+        if win in _WINERRORS_REDE:
+            return True
+        if getattr(exc, "errno", None) in _ERRNOS_REDE:
+            return True
+    return False
+
+
 class BiodataApiConnector:
     """Consulta pacientes via API REST do BIODATA."""
 
@@ -125,6 +161,15 @@ class BiodataApiConnector:
             self._auth_prefix = str(api.get("authorization_prefix") or "")
         else:
             self._auth_prefix = DEFAULT_AUTH_PREFIX
+        self._intervalo_ms = _int_config(
+            api.get("intervalo_ms", DEFAULT_INTERVALO_MS),
+            DEFAULT_INTERVALO_MS,
+        )
+        self._retry_rede = _int_config(
+            api.get("retry_rede", DEFAULT_RETRY_REDE),
+            DEFAULT_RETRY_REDE,
+        )
+        self._last_request_mono: float = 0.0
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
         self._ultimo_cliente_id: Optional[str] = None
@@ -139,6 +184,19 @@ class BiodataApiConnector:
     def close(self) -> None:
         self._token = None
         self._token_expires_at = 0.0
+
+    def _aguardar_intervalo(self) -> None:
+        """Espaça requests para não saturar a API (~24/min com 2500 ms)."""
+        if self._intervalo_ms <= 0:
+            self._last_request_mono = time.monotonic()
+            return
+        now = time.monotonic()
+        if self._last_request_mono > 0:
+            elapsed = now - self._last_request_mono
+            need = self._intervalo_ms / 1000.0
+            if elapsed < need:
+                time.sleep(need - elapsed)
+        self._last_request_mono = time.monotonic()
 
     def buscar_por_id(self, id_paciente: str) -> Optional[PacienteDados]:
         return self.buscar_por_prontuario(id_paciente)
@@ -257,7 +315,10 @@ class BiodataApiConnector:
         *,
         auth: bool,
         _retried: bool = False,
+        _rede_attempt: int = 0,
     ) -> Any:
+        self._aguardar_intervalo()
+
         query = urllib.parse.urlencode(params, doseq=True)
         url = f"{self._base_url}{path}?{query}"
         headers: dict[str, str] = {"Accept": "application/json"}
@@ -274,7 +335,9 @@ class BiodataApiConnector:
             if auth and exc.code == 401 and not _retried:
                 log.warning("%s 401 - renovando token e repetindo", MODULE)
                 self._autenticar()
-                return self._get_json(path, params, auth=auth, _retried=True)
+                return self._get_json(
+                    path, params, auth=auth, _retried=True, _rede_attempt=0
+                )
             detail = ""
             try:
                 detail = exc.read().decode("utf-8", errors="replace")[:200]
@@ -283,9 +346,30 @@ class BiodataApiConnector:
                 detail = ""
             log.error("%s HTTP %s em %s: %s", MODULE, exc.code, path, detail)
             raise BiodataApiError(f"HTTP {exc.code} em {path}") from exc
-        except urllib.error.URLError as exc:
-            log.error("%s rede falhou em %s: %s", MODULE, path, exc.reason)
-            raise BiodataApiError(f"Falha de rede em {path}: {exc.reason}") from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            if _eh_falha_rede(exc) and _rede_attempt < self._retry_rede:
+                wait = RETRY_BACKOFF_BASE_S * (2**_rede_attempt)
+                motivo = getattr(exc, "reason", None) or exc
+                log.warning(
+                    "%s rede falhou em %s: %s — retry %s/%s em %.1fs",
+                    MODULE,
+                    path,
+                    motivo,
+                    _rede_attempt + 1,
+                    self._retry_rede,
+                    wait,
+                )
+                time.sleep(wait)
+                return self._get_json(
+                    path,
+                    params,
+                    auth=auth,
+                    _retried=_retried,
+                    _rede_attempt=_rede_attempt + 1,
+                )
+            motivo = getattr(exc, "reason", None) or exc
+            log.error("%s rede falhou em %s: %s", MODULE, path, motivo)
+            raise BiodataApiError(f"Falha de rede em {path}: {motivo}") from exc
 
         if status and int(status) >= 400:
             raise BiodataApiError(f"HTTP {status} em {path}")
@@ -303,6 +387,8 @@ class BiodataApiConnector:
 __all__ = [
     "BiodataApiConnector",
     "BiodataApiError",
+    "DEFAULT_INTERVALO_MS",
+    "DEFAULT_RETRY_REDE",
     "paciente_from_api_row",
     "password_sha512_hex",
     "sha512_hex",

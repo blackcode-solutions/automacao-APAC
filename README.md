@@ -78,6 +78,7 @@ Edite `config.json`:
 | `biodata.api.param_nome` | Query de busca por nome (padrão `strCliente`) |
 | `biodata.api.paginacao_nome` | Paginação da busca por nome (padrão `0,20`) |
 | `biodata.api.authorization_prefix` | Prefixo do header `Authorization` (padrão `Bearer`; vazio = token puro) |
+| `biodata.api.intervalo_ms` | Espaço mínimo entre requests HTTP (padrão `2500`; `0` desliga o throttle) |
 | `biodata.locators` | Seletores Playwright — só obrigatórios no modo `browser` |
 | `apac.usar_navegacao_inicial` | Menu → 2 Enter até a lista (uma vez por sessão) |
 | `apac.usar_conhost` | `true` (padrão) = abre o APAC no console clássico para ler o buffer da tela |

@@ -51,6 +51,9 @@ class LoteRow:
     highlight: bool
 
 
+MSG_ANEXAR_PLANILHA = "Anexe a planilha para carregar os dados."
+
+
 @dataclass(frozen=True, slots=True)
 class LoteSnapshot:
     rows: tuple[LoteRow, ...]
@@ -58,6 +61,19 @@ class LoteSnapshot:
     total: int
     ultima_etapa: str
     erro: Optional[str] = None
+    mensagem_tabela: Optional[str] = None
+
+
+def snapshot_sem_planilha() -> LoteSnapshot:
+    """Painel vazio quando a UI não tem planilha anexada (não usa config.json)."""
+    return LoteSnapshot(
+        rows=(),
+        concluidos=0,
+        total=0,
+        ultima_etapa="",
+        erro=None,
+        mensagem_tabela=MSG_ANEXAR_PLANILHA,
+    )
 
 
 def status_label(estado: EstadoLancamento) -> str:

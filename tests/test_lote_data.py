@@ -7,6 +7,7 @@ from apac_bot.models import EstadoLancamento, Lancamento
 from apac_bot.progress import ProgressRecord
 from apac_bot.sheet import create_example_workbook
 from apac_bot.ui.lote_data import (
+    MSG_ANEXAR_PLANILHA,
     contar_por_estado,
     export_lote_csv,
     filtrar_linhas_lote,
@@ -14,6 +15,7 @@ from apac_bot.ui.lote_data import (
     linhas_com_problema,
     load_lote_snapshot,
     merge_lote_rows,
+    snapshot_sem_planilha,
     status_label,
 )
 
@@ -213,3 +215,13 @@ def test_load_snapshot_paciente_inicio_vazio_carrega_preview(
     assert snap.total > 0
     assert all(r.nome for r in snap.rows)
     assert "paciente_inicio" not in (snap.erro or "").lower()
+
+
+def test_snapshot_sem_planilha_vazio_com_mensagem():
+    snap = snapshot_sem_planilha()
+    assert snap.rows == ()
+    assert snap.total == 0
+    assert snap.concluidos == 0
+    assert snap.erro is None
+    assert snap.mensagem_tabela == MSG_ANEXAR_PLANILHA
+    assert "anexe a planilha" in snap.mensagem_tabela.casefold()

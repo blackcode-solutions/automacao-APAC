@@ -70,7 +70,20 @@ def optional_text(value: Optional[str]) -> Optional[str]:
 
 # Fallback único quando BIODATA não tem CEP válido (SET e Magnético).
 CEP_PADRAO_APAC = "65010000"
-CEPS_INVALIDOS_APAC = frozenset({"65000000", "65056500"})
+CEPS_INVALIDOS_APAC = frozenset({
+    "65000000",
+    "65056500",
+    "65050152",
+    "65099135",
+    "65058210",
+    "65058000",
+    "65034540",
+    "65055845",
+    "65063685",
+    "65080140",
+    "65100000",
+    "65055485",
+})
 
 
 def cep_para_apac(valor: Optional[str]) -> str:

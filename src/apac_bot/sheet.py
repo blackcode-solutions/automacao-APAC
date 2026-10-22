@@ -341,29 +341,14 @@ def listar_abas_faturamento_glaucoma(caminho: Path) -> list[str]:
 
 
 def _resolver_abas_glaucoma(
-    abas: list[str], aba_escolhida: str
+    abas: list[str], _aba_escolhida: str = ""
 ) -> list[str]:
     """
-    Uma aba por vez: se escolhida e existir, só ela;
-    se vazia e exatamente uma faturamento, usa essa;
-    se vazia e 2+, erro pedindo seleção na UI.
+    Todas as abas de faturamento descobertas no xlsx.
+
+    _aba_escolhida é ignorado (legado); o Iniciar sempre processa a lista completa.
     """
-    escolhida = (aba_escolhida or "").strip()
-    if escolhida:
-        lower = {a.casefold(): a for a in abas}
-        hit = lower.get(escolhida.casefold())
-        if hit is None:
-            raise SheetError(
-                f"Aba glaucoma '{escolhida}' não encontrada entre "
-                f"as de faturamento: {abas}"
-            )
-        return [hit]
-    if len(abas) == 1:
-        return abas
-    raise SheetError(
-        "Selecione a aba da planilha glaucoma na UI "
-        f"(há {len(abas)} abas de faturamento: {abas})."
-    )
+    return list(abas)
 
 
 def _indice_coluna_glaucoma(
@@ -482,8 +467,8 @@ def _load_lancamentos_glaucoma(
     cfg: AppConfig, planilha_override: Optional[Path] = None
 ) -> SheetValidation:
     """
-    Leitor do CENARIO glaucoma: uma aba Base Consultas / TRAT por vez
-    (planilha.aba_glaucoma). Número da APAC = Chave (Guia).
+    Leitor do CENARIO glaucoma: todas as abas Base Consultas / TRAT *
+    descobertas no xlsx (nomes variam por arquivo). Número da APAC = Chave (Guia).
     """
     base = config_dir(cfg)
     caminho = planilha_override or resolve_path(base, cfg.planilha_caminho)
@@ -500,10 +485,12 @@ def _load_lancamentos_glaucoma(
                 f"(esperado 'Base Consultas' e/ou 'TRAT …'). "
                 f"Disponíveis: {wb.sheetnames}"
             )
-        abas = _resolver_abas_glaucoma(abas, cfg.planilha_aba_glaucoma)
+        abas = _resolver_abas_glaucoma(abas)
 
         erros: list[str] = []
-        avisos: list[str] = []
+        avisos: list[str] = [
+            f"Glaucoma: {len(abas)} aba(s): {', '.join(abas)}"
+        ]
         lancamentos: list[Lancamento] = []
         vistas: dict[str, str] = {}
         ignorados_filtro = 0
@@ -529,8 +516,8 @@ def _load_lancamentos_glaucoma(
             )
         if not lancamentos and not erros:
             erros.append(
-                "Planilha glaucoma sem lançamentos na aba selecionada "
-                f"({abas[0]})."
+                "Planilha glaucoma sem lançamentos nas abas de faturamento "
+                f"({', '.join(abas)})."
             )
         return SheetValidation(lancamentos, erros, avisos)
     finally:

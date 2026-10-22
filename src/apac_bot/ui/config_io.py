@@ -327,13 +327,7 @@ def validate_form(form: UiFormData) -> list[str]:
     if not form.planilha_caminho.strip():
         erros.append("Caminho da planilha é obrigatório.")
     modalidade = normalizar_modalidade(form.modalidade)
-    if modalidade == MODALIDADE_GLAUCOMA:
-        if (
-            form.planilha_caminho.strip()
-            and not form.planilha_aba_glaucoma.strip()
-        ):
-            erros.append("Aba da planilha glaucoma é obrigatória.")
-    elif not form.planilha_prontuarios_caminho.strip():
+    if modalidade != MODALIDADE_GLAUCOMA and not form.planilha_prontuarios_caminho.strip():
         erros.append("Caminho da planilha de prontuários é obrigatório.")
 
     fixos = form.dados_fixos_completos()

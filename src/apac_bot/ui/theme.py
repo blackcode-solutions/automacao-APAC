@@ -118,7 +118,13 @@ def style_field_label(master: Any, text: str) -> ctk.CTkLabel:
     )
 
 
-def style_entry(master: Any, **kwargs: Any) -> ctk.CTkEntry:
+def style_entry(
+    master: Any, *, uppercase: bool = True, **kwargs: Any
+) -> ctk.CTkEntry:
+    """CTkEntry padrão; por default força caixa alta em digitação/paste/insert.
+
+    Evita textvariable para não desativar placeholder_text do CTkEntry.
+    """
     opts = {
         "height": ENTRY_HEIGHT,
         "corner_radius": RADIUS_CONTROL,
@@ -127,7 +133,67 @@ def style_entry(master: Any, **kwargs: Any) -> ctk.CTkEntry:
         "text_color": BRAND_FG,
     }
     opts.update(kwargs)
-    return ctk.CTkEntry(master, **opts)
+    entry = ctk.CTkEntry(master, **opts)
+    if uppercase:
+        _attach_uppercase(entry)
+    return entry
+
+
+def _attach_uppercase(entry: ctk.CTkEntry) -> None:
+    """Força caixa alta em insert programático e em edições do Entry (digitação/paste).
+
+    Usa validatecommand (não textvariable) para preservar placeholder_text do CTkEntry.
+    """
+    busy = {"active": False}
+    raw_insert = entry.insert
+
+    def insert_upper(index: Any, string: Any = "") -> Any:
+        text = "" if string is None else str(string)
+        if text and not busy["active"]:
+            text = text.upper()
+        return raw_insert(index, text)
+
+    entry.insert = insert_upper  # type: ignore[method-assign]
+
+    def _apply_upper() -> None:
+        if busy["active"]:
+            return
+        if getattr(entry, "_placeholder_text_active", False):
+            return
+        try:
+            current = entry.get()
+        except Exception:
+            # Widget já destruído
+            return
+        upper = current.upper()
+        if current == upper:
+            return
+        busy["active"] = True
+        try:
+            try:
+                pos = int(entry.index("insert"))
+            except Exception:
+                # Sem foco / widget destruído
+                pos = len(upper)
+            entry.delete(0, "end")
+            raw_insert(0, upper)
+            try:
+                entry.icursor(min(pos, len(upper)))
+            except Exception:
+                # Widget destruído durante o rewrite
+                pass
+        finally:
+            busy["active"] = False
+
+    def _on_validate(new_value: str) -> bool:
+        if new_value != new_value.upper():
+            entry.after_idle(_apply_upper)
+        return True
+
+    entry.configure(
+        validate="all",
+        validatecommand=(entry.register(_on_validate), "%P"),
+    )
 
 
 def style_option(master: Any, values: list[str], **kwargs: Any) -> ctk.CTkOptionMenu:

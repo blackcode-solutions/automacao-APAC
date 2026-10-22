@@ -43,11 +43,18 @@ from apac_bot.ui.lote_data import (
     LoteSnapshot,
     linhas_com_problema,
     load_lote_snapshot,
+    snapshot_sem_planilha,
 )
-from apac_bot.ui.lote_panel import HistoricoLogWindow, LotePanel, RelatorioLoteWindow
+from apac_bot.ui.lote_panel import (
+    HistoricoLogWindow,
+    LotePanel,
+    RelatorioLoteWindow,
+    SetPreviewWindow,
+)
 
 # Marca / splash
 APP_NAME = "SIS DG"
+ABA_GLAUCOMA_TODAS = "Todas as abas"
 APP_TAGLINE = "Sistema de Inteligência em Saúde DG"
 APP_VERSION = "1.0.0"
 BRAND_FG = "#1a2a38"
@@ -116,6 +123,7 @@ class ApacBotApp(ctk.CTk):
         self._lote_panel: Optional[LotePanel] = None
         self._historico_win: Optional[HistoricoLogWindow] = None
         self._relatorio_win: Optional[RelatorioLoteWindow] = None
+        self._set_preview_win: Optional[SetPreviewWindow] = None
         self._lote_poll_after_id: Optional[str] = None
         self._splash_pil: Optional[Image.Image] = None
         self._splash_bg_image: Optional[ctk.CTkImage] = None
@@ -494,6 +502,7 @@ class ApacBotApp(ctk.CTk):
         inner_actions.grid_columnconfigure(0, weight=2)
         inner_actions.grid_columnconfigure(1, weight=1)
         inner_actions.grid_columnconfigure(2, weight=1)
+        inner_actions.grid_columnconfigure(3, weight=1)
 
         self.btn_open_apac = theme.btn_primary(
             inner_actions,
@@ -509,9 +518,13 @@ class ApacBotApp(ctk.CTk):
         )
         self.btn_cancel.grid(row=0, column=1, padx=6, pady=0, sticky="ew")
         self.btn_export_set = theme.btn_secondary(
-            inner_actions, "Exportar SET", command=self._export_set
+            inner_actions, "Exportar arquivo", command=self._export_set
         )
-        self.btn_export_set.grid(row=0, column=2, padx=(6, 0), pady=0, sticky="ew")
+        self.btn_export_set.grid(row=0, column=2, padx=6, pady=0, sticky="ew")
+        self.btn_preview_set = theme.btn_secondary(
+            inner_actions, "Ver arquivo parcial", command=self._show_set_preview
+        )
+        self.btn_preview_set.grid(row=0, column=3, padx=(0, 0), pady=0, sticky="ew")
         self._sync_action_buttons_for_modalidade()
 
         # Fora do body scrollável — evita CTkScrollableFrame aninhado (ghosting no Windows).
@@ -596,10 +609,13 @@ class ApacBotApp(ctk.CTk):
             return
         btn_iniciar = getattr(self, "btn_open_apac", None)
         btn_export = getattr(self, "btn_export_set", None)
+        btn_preview = getattr(self, "btn_preview_set", None)
         if btn_iniciar is None or btn_export is None:
             return
         btn_iniciar.configure(state="normal")
         btn_export.configure(state="normal")
+        if btn_preview is not None:
+            btn_preview.configure(state="normal")
 
     def _add_fields_grid(
         self,
@@ -728,8 +744,10 @@ class ApacBotApp(ctk.CTk):
         if opt_aba is not None:
             try:
                 valor = opt_aba.get().strip()
-                if valor and valor != "—":
+                if valor and valor not in {"—", ABA_GLAUCOMA_TODAS}:
                     self._planilha_aba_glaucoma_cache = valor
+                else:
+                    self._planilha_aba_glaucoma_cache = ""
             except Exception:
                 # widget destruído no rebuild
                 pass
@@ -739,8 +757,9 @@ class ApacBotApp(ctk.CTk):
         if opt is not None:
             try:
                 valor = opt.get().strip()
-                if valor and valor != "—":
+                if valor and valor not in {"—", ABA_GLAUCOMA_TODAS}:
                     return valor
+                return ""
             except Exception:
                 # option menu já destruído
                 pass
@@ -765,19 +784,22 @@ class ApacBotApp(ctk.CTk):
             opt.set("—")
             self._planilha_aba_glaucoma_cache = ""
             return
-        opt.configure(values=abas, state="normal")
+        valores = [ABA_GLAUCOMA_TODAS, *abas]
+        opt.configure(values=valores, state="normal")
         escolhida = (preferida or self._planilha_aba_glaucoma_cache or "").strip()
         lower = {a.casefold(): a for a in abas}
         hit = lower.get(escolhida.casefold()) if escolhida else None
-        selecionada = hit or abas[0]
+        # Default: todas as abas (Iniciar processa o xlsx inteiro).
+        selecionada = hit or ABA_GLAUCOMA_TODAS
         opt.set(selecionada)
-        self._planilha_aba_glaucoma_cache = selecionada
+        self._planilha_aba_glaucoma_cache = hit or ""
 
     def _on_aba_glaucoma_changed(self, choice: str) -> None:
         valor = (choice or "").strip()
         if not valor or valor == "—":
             return
-        self._planilha_aba_glaucoma_cache = valor
+        todas = valor == ABA_GLAUCOMA_TODAS
+        self._planilha_aba_glaucoma_cache = "" if todas else valor
         caminho = getattr(self, "_planilha_caminho_cache", "") or ""
         entry = self._entries.get("planilha_caminho")
         if entry is not None:
@@ -789,7 +811,7 @@ class ApacBotApp(ctk.CTk):
         override = Path(caminho) if caminho else None
         self._refresh_lote_panel(
             planilha_override=override if override and override.is_file() else None,
-            aba_glaucoma_override=valor,
+            aba_glaucoma_override="" if todas else valor,
         )
 
     def _rebuild_planilha_anexos(self) -> None:
@@ -824,7 +846,7 @@ class ApacBotApp(ctk.CTk):
             col_aba = ctk.CTkFrame(host, fg_color="transparent")
             col_aba.grid(row=0, column=1, sticky="ew", padx=0, pady=0)
             col_aba.grid_columnconfigure(0, weight=1)
-            theme.style_field_label(col_aba, "Aba").grid(
+            theme.style_field_label(col_aba, "Abas (todas no Iniciar)").grid(
                 row=0, column=0, sticky="w", padx=0, pady=(0, 2)
             )
             self.opt_aba_glaucoma = theme.style_option(
@@ -957,6 +979,26 @@ class ApacBotApp(ctk.CTk):
         self._relatorio_win = win
         win.present()
 
+    def _ui_planilha_path(self) -> Optional[Path]:
+        """Path da planilha no campo da UI; None se vazio ou arquivo inexistente."""
+        entry = self._entries.get("planilha_caminho")
+        texto = ""
+        if entry is not None:
+            try:
+                texto = entry.get().strip()
+            except Exception:
+                # entry destruído no rebuild
+                texto = ""
+        if not texto:
+            texto = getattr(self, "_planilha_caminho_cache", "") or ""
+            texto = texto.strip()
+        if not texto:
+            return None
+        path = Path(texto)
+        if not path.is_file():
+            return None
+        return path
+
     def _refresh_lote_panel(
         self,
         *,
@@ -966,12 +1008,21 @@ class ApacBotApp(ctk.CTk):
         panel = self._lote_panel
         if panel is None:
             return None
+        override = planilha_override
+        if override is None:
+            override = self._ui_planilha_path()
+        elif not override.is_file():
+            override = None
+        if override is None:
+            snap = snapshot_sem_planilha()
+            panel.apply_snapshot(snap)
+            return snap
         aba = aba_glaucoma_override
         if aba is None and self._modalidade == MODALIDADE_GLAUCOMA:
             aba = self._current_aba_glaucoma() or None
         snap = load_lote_snapshot(
             self._resolve_config_path(),
-            planilha_override=planilha_override,
+            planilha_override=override,
             aba_glaucoma_override=aba,
         )
         panel.apply_snapshot(snap)
@@ -1138,8 +1189,41 @@ class ApacBotApp(ctk.CTk):
             if snap is not None and linhas_com_problema(snap.rows):
                 self._show_relatorio()
 
+    def _staging_path_for_preview(self) -> Optional[Path]:
+        from apac_bot.config import load_config
+        from apac_bot.set_pipeline import caminho_staging
+
+        try:
+            cfg = load_config(self._resolve_config_path())
+        except Exception:
+            return None
+        return caminho_staging(cfg)
+
+    def _show_set_preview(self) -> None:
+        """Abre (ou foca) a janela opcional com o arquivo parcial do staging."""
+        staging = self._staging_path_for_preview()
+        if staging is None:
+            messagebox.showerror(
+                "Ver arquivo parcial",
+                "Não foi possível resolver o caminho do staging "
+                "(config inválida?).",
+            )
+            return
+        win = self._set_preview_win
+        if win is not None and win.is_open:
+            win.set_staging_path(staging)
+            win.present()
+            return
+        win = SetPreviewWindow(
+            self,
+            staging_path=staging,
+            title=f"{APP_NAME} — Arquivo parcial",
+        )
+        self._set_preview_win = win
+        win.present()
+
     def _export_set(self) -> None:
-        """Copia o staging .SET para o destino escolhido pelo usuario."""
+        """Copia o staging para o destino escolhido pelo usuario."""
         from apac_bot.config import load_config
         from apac_bot.set_layout import nome_arquivo_set
         from apac_bot.set_pipeline import caminho_staging
@@ -1147,12 +1231,12 @@ class ApacBotApp(ctk.CTk):
         try:
             cfg = load_config(self._resolve_config_path())
         except Exception as exc:
-            messagebox.showerror("Exportar SET", str(exc))
+            messagebox.showerror("Exportar arquivo", str(exc))
             return
         staging = caminho_staging(cfg)
         if not staging.is_file():
             messagebox.showwarning(
-                "Exportar SET",
+                "Exportar arquivo",
                 "Nenhum arquivo gerado ainda.\n"
                 "Execute «Iniciar» antes de exportar.",
             )
@@ -1166,24 +1250,28 @@ class ApacBotApp(ctk.CTk):
         if not comp:
             comp = str(cfg.export_set.get("competencia_padrao") or "202609")
         default_name = nome_arquivo_set(comp, cfg.modalidade)
+        ext = Path(default_name).suffix or ".SET"
         destino = filedialog.asksaveasfilename(
-            title="Salvar arquivo SET",
-            defaultextension=".SET",
+            title="Salvar arquivo",
+            defaultextension=ext,
             initialfile=default_name,
-            filetypes=[("Arquivo SET", "*.SET"), ("Todos", "*.*")],
+            filetypes=[
+                (f"Arquivo {ext.lstrip('.').upper()}", f"*{ext}"),
+                ("Todos", "*.*"),
+            ],
         )
         if not destino:
             return
         dest = Path(destino)
-        if dest.suffix.upper() != ".SET":
-            dest = dest.with_suffix(".SET")
+        if dest.suffix.upper() != ext.upper():
+            dest = dest.with_suffix(ext)
         try:
             dest.write_bytes(staging.read_bytes())
         except OSError as exc:
-            messagebox.showerror("Exportar SET", f"Falha ao salvar:\n{exc}")
+            messagebox.showerror("Exportar arquivo", f"Falha ao salvar:\n{exc}")
             return
-        self._append_log(f"[UI] SET exportado: {dest}\n")
-        messagebox.showinfo("Exportar SET", f"Arquivo salvo em:\n{dest}")
+        self._append_log(f"[UI] Arquivo exportado: {dest}\n")
+        messagebox.showinfo("Exportar arquivo", f"Arquivo salvo em:\n{dest}")
 
     def _cancel_job(self) -> None:
         proc = self._proc

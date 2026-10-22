@@ -294,7 +294,7 @@ def test_validate_glaucoma_aceita_form_ok():
     assert "ainda não configurada" not in " ".join(erros).lower()
 
 
-def test_validate_glaucoma_exige_aba():
+def test_validate_glaucoma_aceita_sem_aba():
     form = _form_ok(
         modalidade=MODALIDADE_GLAUCOMA,
         planilha_caminho="data/cenario.xlsx",
@@ -302,7 +302,7 @@ def test_validate_glaucoma_exige_aba():
         planilha_aba_glaucoma="",
     )
     erros = validate_form(form)
-    assert any("aba" in e.casefold() for e in erros)
+    assert erros == []
 
 
 def test_form_from_raw_migra_planilha_glaucoma_legado_para_planilha():

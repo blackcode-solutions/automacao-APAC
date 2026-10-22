@@ -4,8 +4,10 @@ Pipeline gerar-set: planilha + BIODATA -> arquivo staging .SET (sem APAC.exe).
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from apac_bot.config import (
     MODALIDADE_GLAUCOMA,
@@ -17,6 +19,7 @@ from apac_bot.config import (
 )
 from apac_bot.connectors import build_connector
 from apac_bot.connectors.biodata import BiodataMappingError
+from apac_bot.connectors.biodata_api import BiodataApiError
 from apac_bot.logging_safe import setup_logging, short_id
 from apac_bot.models import EstadoLancamento, Lancamento, PacienteDados
 from apac_bot.normalize import (
@@ -31,7 +34,7 @@ from apac_bot.pipeline import (
     resolver_paciente,
     validar_dados_obrigatorios_apac,
 )
-from apac_bot.progress import ProgressStore
+from apac_bot.progress import ProgressStore, filtrar_pendentes_lote
 from apac_bot.set_layout import (
     CabecalhoSet,
     CidGeralSet,
@@ -52,6 +55,7 @@ from apac_bot.sheet import SheetError, listar_lancamentos_a_partir, nome_mae_val
 log = setup_logging()
 
 STAGING_NAME = "lote_atual.SET"
+CHECKPOINT_NAME = "lote_parcial.json"
 BAIRRO_PADRAO_SET = "CENTRO"
 NUMERO_PADRAO_SET = "SN"
 
@@ -101,6 +105,118 @@ def pasta_staging(cfg: AppConfig) -> Path:
 
 def caminho_staging(cfg: AppConfig) -> Path:
     return pasta_staging(cfg) / STAGING_NAME
+
+
+def caminho_checkpoint(cfg: AppConfig) -> Path:
+    return pasta_staging(cfg) / CHECKPOINT_NAME
+
+
+def record_to_dict(rec: PacienteSetRecord) -> dict[str, Any]:
+    return {
+        "corpo": asdict(rec.corpo),
+        "cid": asdict(rec.cid),
+        "procedimentos": [asdict(p) for p in rec.procedimentos],
+    }
+
+
+def record_from_dict(raw: dict[str, Any]) -> PacienteSetRecord:
+    return PacienteSetRecord(
+        corpo=CorpoApacSet(**raw["corpo"]),
+        cid=CidGeralSet(**raw["cid"]),
+        procedimentos=tuple(
+            ProcedimentoSet(**p) for p in (raw.get("procedimentos") or [])
+        ),
+    )
+
+
+def salvar_checkpoint(
+    cfg: AppConfig,
+    *,
+    competencia: str,
+    records: list[PacienteSetRecord],
+) -> Path:
+    path = caminho_checkpoint(cfg)
+    payload = {
+        "incompleto": True,
+        "competencia": competencia,
+        "records": [record_to_dict(r) for r in records],
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+def carregar_checkpoint(
+    cfg: AppConfig,
+) -> Optional[tuple[str, list[PacienteSetRecord]]]:
+    """Retorna (competencia, records) se houver lote incompleto; senão None."""
+    path = caminho_checkpoint(cfg)
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("[gerar-set] checkpoint inválido (%s) — ignorando", exc)
+        return None
+    if not isinstance(raw, dict) or not raw.get("incompleto"):
+        return None
+    competencia = str(raw.get("competencia") or "").strip()
+    items = raw.get("records")
+    if not competencia or not isinstance(items, list) or not items:
+        return None
+    try:
+        records = [record_from_dict(item) for item in items if isinstance(item, dict)]
+    except (TypeError, KeyError, SetLayoutError) as exc:
+        log.warning("[gerar-set] checkpoint corrompido (%s) — ignorando", exc)
+        return None
+    if not records:
+        return None
+    return competencia, records
+
+
+def limpar_checkpoint(cfg: AppConfig) -> None:
+    path = caminho_checkpoint(cfg)
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError as exc:
+            log.warning("[gerar-set] falha ao remover checkpoint: %s", exc)
+
+
+def _gravar_set_arquivos(
+    cfg: AppConfig,
+    records: list[PacienteSetRecord],
+    competencia: str,
+) -> Path:
+    """Monta e grava o mesmo staging + nome sugerido. Retorna path do staging."""
+    cab = CabecalhoSet(
+        competencia=competencia,
+        qtd_apac=len(records),
+        smt_vrf="0000",
+        orgao_origem=_export(
+            cfg, "orgao_origem", "CLINICA DE SERVICOS MEDICOS GE"
+        ),
+        sigla=_export(cfg, "sigla", "CSMG"),
+        cgc=_export(cfg, "cgc", "01192155000210"),
+        orgao_destino=_export(cfg, "orgao_destino", "SECRETARIA DE SAUDE"),
+        destino_in=destino_in_para_modalidade(cfg.modalidade),
+        data_geracao=data_geracao_hoje(),
+        versao=_export(cfg, "versao", "Versao 04.01"),
+    )
+    blob = montar_arquivo(cab, records)
+    staging = caminho_staging(cfg)
+    staging.write_bytes(blob)
+    sugerido = pasta_staging(cfg) / nome_arquivo_set(competencia, cfg.modalidade)
+    sugerido.write_bytes(blob)
+    log.info(
+        "[gerar-set] gravado staging=%s sugerido=%s pacientes=%s",
+        staging,
+        sugerido,
+        len(records),
+    )
+    return staging
 
 
 def _competencia_lanc(lanc: Lancamento, fallback: str) -> str:
@@ -288,6 +404,32 @@ def montar_record_paciente(
     )
 
 
+def _persistir_parcial_apos_erro(
+    cfg: AppConfig,
+    records: list[PacienteSetRecord],
+    competencia_lote: Optional[str],
+) -> None:
+    """Salva checkpoint + o mesmo SET parcial (para retomada num único arquivo)."""
+    if not records or not competencia_lote:
+        return
+    try:
+        salvar_checkpoint(cfg, competencia=competencia_lote, records=records)
+        _gravar_set_arquivos(cfg, records, competencia_lote)
+        log.error(
+            "[gerar-set] lote incompleto salvo (%s paciente(s)) — "
+            "próximo Iniciar retoma e completa o mesmo SET",
+            len(records),
+        )
+    except SetLayoutError as exc:
+        log.error("[gerar-set] falha ao gravar parcial: %s", exc)
+        try:
+            salvar_checkpoint(cfg, competencia=competencia_lote, records=records)
+        except OSError as exc2:
+            log.error("[gerar-set] falha ao salvar checkpoint: %s", exc2)
+    except OSError as exc:
+        log.error("[gerar-set] falha ao salvar parcial: %s", exc)
+
+
 def cmd_gerar_set(
     cfg: AppConfig,
     *,
@@ -297,6 +439,9 @@ def cmd_gerar_set(
     """
     Consulta BIODATA e grava staging .SET (layout INTERNO).
     Retorna 0 se gerou arquivo com >=1 paciente; 1 se nenhum; 2 erro fatal.
+
+    Se existir checkpoint de lote incompleto (aborto anterior), retoma só os
+    pendentes e grava o mesmo SET único com (já feitos + novos).
     """
     try:
         fila = listar_lancamentos_a_partir(cfg, planilha)
@@ -321,13 +466,28 @@ def cmd_gerar_set(
 
     try:
         connector = build_connector(cfg.sistema_origem, cfg)
-    except BiodataMappingError as exc:
+    except (BiodataMappingError, BiodataApiError) as exc:
         log.error("[gerar-set] %s", exc)
         return 2
 
     store = _store(cfg)
-    records: list[PacienteSetRecord] = []
-    competencia_lote: Optional[str] = None
+    checkpoint = carregar_checkpoint(cfg)
+    retomando = checkpoint is not None
+    if retomando:
+        competencia_lote, records = checkpoint
+        records = list(records)
+        fila, pulados, _alterados = filtrar_pendentes_lote(fila, store)
+        log.info(
+            "[gerar-set] retomando lote incompleto: checkpoint=%s "
+            "pendente(s)=%s pulado(s)=%s",
+            len(records),
+            len(fila),
+            len(pulados),
+        )
+    else:
+        records = []
+        competencia_lote = None
+
     ok = 0
     revisao = 0
     erros = 0
@@ -335,7 +495,22 @@ def cmd_gerar_set(
     try:
         for lanc in fila:
             store.upsert(lanc, EstadoLancamento.EM_PROCESSAMENTO)
-            paciente, motivo = resolver_paciente(connector, lanc)
+            try:
+                paciente, motivo = resolver_paciente(connector, lanc)
+            except BiodataApiError as exc:
+                store.upsert(
+                    lanc,
+                    EstadoLancamento.ERRO,
+                    motivo=str(exc)[:300],
+                )
+                log.error(
+                    "[gerar-set] API/rede identidade=%s: %s",
+                    short_id(lanc.identidade),
+                    exc,
+                )
+                _persistir_parcial_apos_erro(cfg, records, competencia_lote)
+                return 2
+
             if motivo:
                 store.upsert(
                     lanc,
@@ -370,6 +545,14 @@ def cmd_gerar_set(
                     short_id(lanc.identidade),
                     lanc.numeracao_original,
                 )
+                # Staging ao vivo para preview/export parcial durante o lote.
+                try:
+                    _gravar_set_arquivos(cfg, records, competencia_lote)
+                except (SetLayoutError, OSError) as exc:
+                    log.warning(
+                        "[gerar-set] falha ao atualizar staging parcial: %s",
+                        exc,
+                    )
             except SetLayoutError as exc:
                 store.upsert(lanc, EstadoLancamento.ERRO, motivo=str(exc))
                 log.error(
@@ -402,42 +585,19 @@ def cmd_gerar_set(
         )
         return 1
 
-    cab = CabecalhoSet(
-        competencia=competencia_lote,
-        qtd_apac=len(records),
-        smt_vrf="0000",
-        orgao_origem=_export(
-            cfg, "orgao_origem", "CLINICA DE SERVICOS MEDICOS GE"
-        ),
-        sigla=_export(cfg, "sigla", "CSMG"),
-        cgc=_export(cfg, "cgc", "01192155000210"),
-        orgao_destino=_export(cfg, "orgao_destino", "SECRETARIA DE SAUDE"),
-        destino_in=destino_in_para_modalidade(cfg.modalidade),
-        data_geracao=data_geracao_hoje(),
-        versao=_export(cfg, "versao", "Versao 04.01"),
-    )
     try:
-        blob = montar_arquivo(cab, records)
+        _gravar_set_arquivos(cfg, records, competencia_lote)
     except SetLayoutError as exc:
         log.error("[gerar-set] falha ao montar arquivo: %s", exc)
+        _persistir_parcial_apos_erro(cfg, records, competencia_lote)
         return 2
 
-    staging = caminho_staging(cfg)
-    staging.write_bytes(blob)
-    sugerido = pasta_staging(cfg) / nome_arquivo_set(
-        competencia_lote, cfg.modalidade
-    )
-    sugerido.write_bytes(blob)
+    limpar_checkpoint(cfg)
     log.info(
-        "[gerar-set] gravado staging=%s sugerido=%s pacientes=%s",
-        staging,
-        sugerido,
-        len(records),
-    )
-    log.info(
-        "[gerar-set] finalizado ok=%s revisao=%s erros=%s",
+        "[gerar-set] finalizado ok=%s revisao=%s erros=%s total_set=%s",
         ok,
         revisao,
         erros,
+        len(records),
     )
     return 0 if erros == 0 else 1

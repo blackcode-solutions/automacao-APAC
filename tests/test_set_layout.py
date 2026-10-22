@@ -30,9 +30,10 @@ def _slice(line: str, ini: int, fim: int) -> str:
 
 def test_nome_arquivo_set():
     assert nome_arquivo_set("202609", "padrao") == "APOFTA09.SET"
-    assert nome_arquivo_set("202612", "padrao") == "APOFTA12.SET"
-    assert nome_arquivo_set("202610", "glaucoma") == "APGLAU10.SET"
-    assert nome_arquivo_set("202601", "padrao") == "APOFTA01.SET"
+    assert nome_arquivo_set("202609", "glaucoma") == "APGLAU09.SET"
+    assert nome_arquivo_set("202610", "glaucoma") == "APGLAU10.OUT"
+    assert nome_arquivo_set("202612", "padrao") == "APOFTA12.DEZ"
+    assert nome_arquivo_set("202601", "padrao") == "APOFTA01.JAN"
 
 
 def test_calcular_smt_vrf_um_paciente():

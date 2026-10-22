@@ -413,10 +413,37 @@ def montar_arquivo(
     return body + LINE_ENDING + EOF_SUB
 
 
+# Sigla do mês da competência → extensão do arquivo de entrega (01=JAN … 12=DEZ).
+EXTENSAO_MES_COMPETENCIA: tuple[str, ...] = (
+    "JAN",
+    "FEV",
+    "MAR",
+    "ABR",
+    "MAI",
+    "JUN",
+    "JUL",
+    "AGO",
+    "SET",
+    "OUT",
+    "NOV",
+    "DEZ",
+)
+
+
+def extensao_por_competencia(competencia: str) -> str:
+    """Retorna a extensão (ex. '.SET', '.OUT') a partir do mês AAAAMM."""
+    c = competencia_aaaamm(competencia)
+    mes = int(c[4:6])
+    if mes < 1 or mes > 12:
+        raise SetLayoutError(f"mes de competencia invalido: {c!r}")
+    return f".{EXTENSAO_MES_COMPETENCIA[mes - 1]}"
+
+
 def nome_arquivo_set(competencia: str, modalidade: str) -> str:
-    """APOFTA09.SET / APGLAU09.SET a partir da competencia do lote (AAAAMM).
+    """APOFTA09.SET / APGLAU10.OUT a partir da competencia do lote (AAAAMM).
 
     Basename sempre 8 caracteres: prefixo da modalidade (6) + MM (2).
+    Extensão = sigla do mês da competência (SET, OUT, …).
     A competencia do lote ja e o mes anterior no dominio — nao subtrair 1.
     """
     c = competencia_aaaamm(competencia)
@@ -426,7 +453,7 @@ def nome_arquivo_set(competencia: str, modalidade: str) -> str:
         if normalizar_modalidade_cfg(modalidade) == MODALIDADE_GLAUCOMA
         else "APOFTA"
     )
-    return f"{prefixo}{mes}.SET"
+    return f"{prefixo}{mes}{extensao_por_competencia(c)}"
 
 
 def data_geracao_hoje() -> str:

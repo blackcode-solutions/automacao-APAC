@@ -139,6 +139,16 @@ class LotePanel(ctk.CTkFrame):
         self.tree.grid(row=0, column=0, sticky="ew")
         scrollbar.grid(row=0, column=1, sticky="ns")
 
+        # Overlay centralizado no estado sem planilha (Treeview não centra bem entre cols).
+        self.lbl_empty_msg = ctk.CTkLabel(
+            table_wrap,
+            text="",
+            font=theme.font_subtitle(),
+            text_color=theme.BRAND_MUTED,
+            anchor="center",
+            justify="center",
+        )
+
         foot = ctk.CTkFrame(self, fg_color="transparent")
         foot.grid(row=2, column=0, sticky="ew", padx=pad, pady=(8, pad))
         foot.grid_columnconfigure(0, weight=1)
@@ -200,10 +210,22 @@ class LotePanel(ctk.CTkFrame):
             self.lbl_erro.configure(text="")
             self.lbl_erro.grid_remove()
 
-        self._render_rows(snap.rows)
+        self._render_rows(snap.rows, mensagem_tabela=snap.mensagem_tabela)
 
-    def _render_rows(self, rows: tuple[LoteRow, ...]) -> None:
+    def _render_rows(
+        self,
+        rows: tuple[LoteRow, ...],
+        *,
+        mensagem_tabela: str | None = None,
+    ) -> None:
         self.tree.delete(*self.tree.get_children())
+        if not rows and mensagem_tabela:
+            self.lbl_empty_msg.configure(text=mensagem_tabela)
+            self.lbl_empty_msg.place(relx=0.5, rely=0.55, anchor="center")
+            self.lbl_empty_msg.lift()
+            return
+        self.lbl_empty_msg.place_forget()
+        self.lbl_empty_msg.configure(text="")
         for row in rows:
             prefix = _BADGE_PREFIX.get(row.estado, "")
             status_text = f"{prefix}{status_label(row.estado)}"
@@ -522,3 +544,169 @@ class HistoricoLogWindow(ctk.CTkToplevel):
         self.log_box.insert("end", text)
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
+
+
+_MSG_ARQUIVO_AUSENTE = (
+    "Nenhum arquivo gerado ainda.\n"
+    "Execute «Iniciar» para começar a montar o arquivo."
+)
+
+
+class SetPreviewWindow(ctk.CTkToplevel):
+    """Janela read-only com o conteúdo do staging (atualiza sob demanda/poll)."""
+
+    def __init__(
+        self,
+        master: ctk.CTk,
+        *,
+        staging_path: Path,
+        title: str = "Arquivo parcial",
+        poll_ms: int = 1000,
+    ) -> None:
+        super().__init__(master)
+        self.title(title)
+        self.geometry("780x480")
+        self.minsize(520, 320)
+        self.configure(fg_color=theme.BG)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        self._staging_path = Path(staging_path)
+        self._poll_ms = max(500, int(poll_ms))
+        self._poll_after_id: str | None = None
+        self._closed = False
+        self._last_mtime_ns: int | None = None
+        self._last_size: int | None = None
+
+        hdr = ctk.CTkFrame(self, fg_color=theme.SURFACE, corner_radius=0)
+        hdr.grid(row=0, column=0, sticky="ew")
+        hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            hdr,
+            text=title,
+            font=theme.font_section(),
+            text_color=theme.BRAND_FG,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=14, pady=12)
+        self.lbl_status = ctk.CTkLabel(
+            hdr,
+            text="",
+            font=theme.font_subtitle(),
+            text_color=theme.BRAND_MUTED,
+            anchor="e",
+        )
+        self.lbl_status.grid(row=0, column=1, sticky="e", padx=14, pady=12)
+
+        self.text_box = ctk.CTkTextbox(
+            self,
+            font=theme.font_mono(),
+            fg_color=theme.SURFACE,
+            text_color=theme.BRAND_FG,
+            border_width=1,
+            border_color=theme.BORDER,
+            corner_radius=theme.RADIUS_CONTROL,
+            wrap="none",
+        )
+        self.text_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self.text_box.configure(state="disabled")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.transient(master)
+        self.after(50, self.present)
+        self.refresh()
+        self._schedule_poll()
+
+    def present(self) -> None:
+        if self._closed:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _on_close(self) -> None:
+        self._stop_poll()
+        self._closed = True
+        self.destroy()
+
+    @property
+    def is_open(self) -> bool:
+        if self._closed:
+            return False
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
+
+    def _stop_poll(self) -> None:
+        if self._poll_after_id is None:
+            return
+        try:
+            self.after_cancel(self._poll_after_id)
+        except Exception:
+            # after id já inválido
+            pass
+        self._poll_after_id = None
+
+    def _schedule_poll(self) -> None:
+        self._stop_poll()
+        if not self.is_open:
+            return
+        self._poll_after_id = self.after(self._poll_ms, self._poll_tick)
+
+    def _poll_tick(self) -> None:
+        self._poll_after_id = None
+        if not self.is_open:
+            return
+        self.refresh()
+        self._schedule_poll()
+
+    def set_staging_path(self, path: Path) -> None:
+        self._staging_path = Path(path)
+        self._last_mtime_ns = None
+        self._last_size = None
+        self.refresh()
+
+    def _set_text(self, text: str) -> None:
+        if not self.is_open:
+            return
+        self.text_box.configure(state="normal")
+        self.text_box.delete("1.0", "end")
+        self.text_box.insert("end", text)
+        self.text_box.see("end")
+        self.text_box.configure(state="disabled")
+
+    def refresh(self) -> None:
+        """Relê o staging se mudou; mantém scroll no fim."""
+        if not self.is_open:
+            return
+        path = self._staging_path
+        if not path.is_file():
+            self.lbl_status.configure(text="aguardando…")
+            self._set_text(_MSG_ARQUIVO_AUSENTE)
+            self._last_mtime_ns = None
+            self._last_size = None
+            return
+        try:
+            st = path.stat()
+            mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+            size = st.st_size
+            if (
+                self._last_mtime_ns == mtime_ns
+                and self._last_size == size
+            ):
+                return
+            raw = path.read_bytes()
+            text = raw.decode("latin-1", errors="replace")
+        except OSError as exc:
+            self.lbl_status.configure(text="erro de leitura")
+            self._set_text(f"Falha ao ler staging:\n{exc}")
+            return
+        self._last_mtime_ns = mtime_ns
+        self._last_size = size
+        self.lbl_status.configure(text=f"{size} bytes")
+        self._set_text(text)

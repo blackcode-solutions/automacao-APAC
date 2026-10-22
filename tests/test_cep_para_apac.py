@@ -24,8 +24,21 @@ def test_cep_para_apac_default_quando_ausente():
 
 
 def test_cep_para_apac_substitui_ceps_invalidos():
-    assert cep_para_apac("65000000") == "65010000"
-    assert cep_para_apac("65056500") == "65010000"
+    for cep in (
+        "65000000",
+        "65056500",
+        "65050152",
+        "65099135",
+        "65058210",
+        "65058000",
+        "65034540",
+        "65055845",
+        "65063685",
+        "65080140",
+        "65100000",
+        "65055485",
+    ):
+        assert cep_para_apac(cep) == "65010000"
 
 
 def _cfg() -> AppConfig:
@@ -89,7 +102,20 @@ def test_montar_com_cep_preserva():
 
 
 def test_montar_substitui_ceps_invalidos():
-    for cep in ("65000000", "65056500"):
+    for cep in (
+        "65000000",
+        "65056500",
+        "65050152",
+        "65099135",
+        "65058210",
+        "65058000",
+        "65034540",
+        "65055845",
+        "65063685",
+        "65080140",
+        "65100000",
+        "65055485",
+    ):
         rec = montar_record_paciente(
             _cfg(), _lanc(cep=cep), competencia="202609"
         )

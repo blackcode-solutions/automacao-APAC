@@ -256,26 +256,29 @@ def _xlsx_cenario_glaucoma(
     wb.save(path)
 
 
-def test_glaucoma_le_so_aba_selecionada(tmp_path: Path):
+def test_glaucoma_carrega_todas_abas_faturamento(tmp_path: Path):
     path = tmp_path / "cenario.xlsx"
     _xlsx_cenario_glaucoma(path)
 
     example = json.loads(Path("config.example.json").read_text(encoding="utf-8"))
     example["planilha"]["caminho"] = str(path)
     example["planilha"]["aba"] = "PRODUÇÃO APAC SETEMBRO 2026"
+    # aba_glaucoma no config é ignorado — processa todas as descobertas no xlsx.
     example["planilha"]["aba_glaucoma"] = "TRAT 0303050160"
     example.setdefault("apac", {})["modalidade"] = MODALIDADE_GLAUCOMA
     cfg = AppConfig(raw=example, path=tmp_path / "c.json")
 
     result = load_lancamentos(cfg)
     assert result.ok, result.erros
-    assert len(result.lancamentos) == 1
-    lac = result.lancamentos[0]
-    assert lac.codigo_original == "0303050160"
-    assert lac.prontuario == "1956670"
-    assert lac.paciente_nome.startswith("FRANCISCO")
-    assert lac.numeracao_original == "212620199580-8"
-    assert lac.codigos_associados == []
+    assert len(result.lancamentos) == 2
+    por_codigo = {l.codigo_original: l for l in result.lancamentos}
+    assert set(por_codigo) == {"0301010102", "0303050160"}
+    trat = por_codigo["0303050160"]
+    assert trat.prontuario == "1956670"
+    assert trat.paciente_nome.startswith("FRANCISCO")
+    assert trat.numeracao_original == "212620199580-8"
+    assert trat.codigos_associados == []
+    assert any("2 aba(s)" in a for a in result.avisos)
 
 
 def test_glaucoma_le_codigos_associados(tmp_path: Path):
@@ -293,12 +296,11 @@ def test_glaucoma_le_codigos_associados(tmp_path: Path):
 
     result = load_lancamentos(cfg)
     assert result.ok, result.erros
-    lac = result.lancamentos[0]
-    assert lac.codigo_apac == "0303050160"
-    assert lac.codigos_associados == ["0303050187", "0303050195"]
+    trat = next(l for l in result.lancamentos if l.codigo_apac == "0303050160")
+    assert trat.codigos_associados == ["0303050187", "0303050195"]
 
 
-def test_glaucoma_sem_aba_e_multiplas_faturamento_erro(tmp_path: Path):
+def test_glaucoma_sem_aba_carrega_todas(tmp_path: Path):
     path = tmp_path / "cenario.xlsx"
     _xlsx_cenario_glaucoma(path)
 
@@ -308,8 +310,12 @@ def test_glaucoma_sem_aba_e_multiplas_faturamento_erro(tmp_path: Path):
     example.setdefault("apac", {})["modalidade"] = MODALIDADE_GLAUCOMA
     cfg = AppConfig(raw=example, path=tmp_path / "c.json")
 
-    with pytest.raises(SheetError, match="Selecione a aba"):
-        load_lancamentos(cfg)
+    result = load_lancamentos(cfg)
+    assert result.ok, result.erros
+    assert len(result.lancamentos) == 2
+    nomes = {l.paciente_nome for l in result.lancamentos}
+    assert any(n.startswith("FRANCISCO") for n in nomes)
+    assert any(n.startswith("ROSELIA") for n in nomes)
 
 
 def test_glaucoma_uma_aba_faturamento_automatica(tmp_path: Path):
