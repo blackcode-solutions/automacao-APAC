@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 import subprocess
 import sys
 import threading
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import PhotoImage, filedialog, messagebox
 from typing import Optional
 
 import customtkinter as ctk
 from PIL import Image
 
+from apac_bot.config import ConfigError, load_config
+from apac_bot.license import LicenseError, ensure_license, license_enabled
 from apac_bot.sheet import SheetError, listar_abas_faturamento_glaucoma
 from apac_bot.ui import theme
 from apac_bot.ui.config_io import (
@@ -33,6 +36,7 @@ from apac_bot.ui.config_io import (
     normalizar_modalidade,
     normalizar_sistema_origem,
     save_form,
+    save_license_key,
     save_modalidade,
     secrets_missing,
     secoes_para_modalidade,
@@ -76,9 +80,15 @@ SPLASH_META: dict = {
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
+log = logging.getLogger(__name__)
+
+WINDOW_ICON_FILE = "icon_dg.png"
+
 
 def _assets_dir() -> Path:
-    return Path(__file__).resolve().parent / "assets"
+    from apac_bot.runtime_paths import ui_assets_dir
+
+    return ui_assets_dir()
 
 
 def _splash_bg_path() -> Optional[Path]:
@@ -89,6 +99,11 @@ def _splash_bg_path() -> Optional[Path]:
         if path.is_file():
             return path
     return None
+
+
+def _window_icon_path() -> Optional[Path]:
+    path = _assets_dir() / WINDOW_ICON_FILE
+    return path if path.is_file() else None
 
 
 def _pil_fill(
@@ -124,6 +139,7 @@ class ApacBotApp(ctk.CTk):
         self._historico_win: Optional[HistoricoLogWindow] = None
         self._relatorio_win: Optional[RelatorioLoteWindow] = None
         self._set_preview_win: Optional[SetPreviewWindow] = None
+        self._export_cliente_busy = False
         self._lote_poll_after_id: Optional[str] = None
         self._splash_pil: Optional[Image.Image] = None
         self._splash_bg_image: Optional[ctk.CTkImage] = None
@@ -138,8 +154,10 @@ class ApacBotApp(ctk.CTk):
         self._dados_fixos_cache: dict[str, str] = {}
         self._secoes_host: Optional[ctk.CTkFrame] = None
         self._body: Optional[ctk.CTkScrollableFrame] = None
+        self._window_icon: Optional[PhotoImage] = None
 
         self.title(f"{APP_NAME} — {APP_TAGLINE}")
+        self._apply_window_icon()
         # Splash fixa 1024x576 (proporção da arte welcome — evita logo achatada)
         self.geometry("1024x576")
         self.minsize(1024, 576)
@@ -147,6 +165,19 @@ class ApacBotApp(ctk.CTk):
         self.resizable(False, False)
         self.configure(fg_color=SPLASH_BG)
         self._show_splash()
+
+    def _apply_window_icon(self) -> None:
+        """Ícone da barra de título / taskbar (PNG empacotado)."""
+        path = _window_icon_path()
+        if path is None:
+            log.warning("[ui] ícone da janela ausente: %s", WINDOW_ICON_FILE)
+            return
+        try:
+            # Manter referência: PhotoImage é GC-sensível no Tk
+            self._window_icon = PhotoImage(file=str(path))
+            self.iconphoto(True, self._window_icon)
+        except Exception as exc:
+            log.warning("[ui] falha ao aplicar ícone da janela: %s", exc)
 
     def _clear_root(self) -> None:
         self._stop_lote_poll()
@@ -336,20 +367,133 @@ class ApacBotApp(ctk.CTk):
             self._splash_version.lift()
 
     def _on_comecar(self) -> None:
-        self._show_main()
+        self._try_enter_after_license()
 
-    def _show_main(self) -> None:
+    def _try_enter_after_license(self) -> None:
+        """Splash/gate → main se licença ok; senão abre tela de ativação."""
+        path = self._resolve_config_path()
+        if not path.is_file():
+            # Sem config: deixa entrar para configurar (server_url vazio = skip).
+            self._show_main()
+            return
+        try:
+            cfg = load_config(path)
+        except ConfigError as exc:
+            messagebox.showerror("Config", str(exc))
+            return
+        if not license_enabled(cfg):
+            self._show_main()
+            return
+        try:
+            result = ensure_license(cfg, app_version=APP_VERSION)
+            if result.source == "cache":
+                messagebox.showwarning(
+                    "Licença",
+                    "Servidor de licença inacessível.\n"
+                    "Usando autorização em cache (período de graça).",
+                )
+            self._show_main()
+        except LicenseError as exc:
+            self._show_license_gate(erro=str(exc))
+
+    def _prepare_post_splash_window(self, *, title: str, geometry: str) -> None:
         self._splash_mode = False
         self._clear_root()
-        # Libera o maxsize da splash (senão a janela continua travada).
         screen_w = max(self.winfo_screenwidth(), 1280)
         screen_h = max(self.winfo_screenheight(), 900)
         self.maxsize(screen_w, screen_h)
-        self.minsize(720, 520)
+        self.minsize(480, 360)
         self.resizable(True, True)
-        self.geometry("980x780")
+        self.geometry(geometry)
         self.configure(fg_color=theme.BG)
-        self.title(f"{APP_NAME} — Automação APAC")
+        self.title(title)
+        self.unbind("<Configure>")
+
+    def _show_license_gate(self, *, erro: str = "") -> None:
+        """Tela entre splash e main: colar chave e validar."""
+        self._prepare_post_splash_window(
+            title=f"{APP_NAME} — Ativar licença",
+            geometry="520x360",
+        )
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        card = theme.make_card(self)
+        card.grid(row=0, column=0, sticky="nsew", padx=24, pady=24)
+        card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            card,
+            text=APP_NAME,
+            font=theme.font_title(),
+            text_color=theme.BRAND_FG,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=theme.PAD_CARD, pady=(theme.PAD_CARD, 4))
+        ctk.CTkLabel(
+            card,
+            text="Ative a licença para acessar o sistema.",
+            font=theme.font_subtitle(),
+            text_color=theme.BRAND_MUTED,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="w", padx=theme.PAD_CARD, pady=(0, 16))
+
+        theme.style_field_label(card, "Chave de licença").grid(
+            row=2, column=0, sticky="w", padx=theme.PAD_CARD, pady=(0, 2)
+        )
+        entry = theme.style_entry(card, uppercase=False, show="*")
+        entry.grid(row=3, column=0, sticky="ew", padx=theme.PAD_CARD, pady=(0, 8))
+        self._license_gate_entry = entry
+
+        self._license_gate_erro = ctk.CTkLabel(
+            card,
+            text=erro or "",
+            text_color=theme.WARNING,
+            font=theme.font_subtitle(),
+            wraplength=420,
+            justify="left",
+            anchor="w",
+        )
+        self._license_gate_erro.grid(
+            row=4, column=0, sticky="ew", padx=theme.PAD_CARD, pady=(0, 12)
+        )
+
+        theme.btn_primary(
+            card,
+            "Validar e entrar",
+            command=self._on_license_gate_validate,
+            width=200,
+        ).grid(row=5, column=0, sticky="w", padx=theme.PAD_CARD, pady=(0, theme.PAD_CARD))
+
+        entry.focus_set()
+
+    def _on_license_gate_validate(self) -> None:
+        path = self._resolve_config_path()
+        entry = getattr(self, "_license_gate_entry", None)
+        key = entry.get().strip() if entry is not None else ""
+        try:
+            save_license_key(path, key)
+            cfg = load_config(path)
+            result = ensure_license(cfg, app_version=APP_VERSION)
+        except (ConfigIoError, ConfigError, LicenseError) as exc:
+            if getattr(self, "_license_gate_erro", None) is not None:
+                self._license_gate_erro.configure(text=str(exc))
+            else:
+                messagebox.showerror("Licença", str(exc))
+            return
+        if result.source == "cache":
+            messagebox.showwarning(
+                "Licença",
+                "Servidor de licença inacessível.\n"
+                "Usando autorização em cache (período de graça).",
+            )
+        self._show_main()
+
+    def _show_main(self) -> None:
+        self._prepare_post_splash_window(
+            title=f"{APP_NAME} — Automação APAC",
+            geometry="980x780",
+        )
+        self.minsize(720, 520)
         self._build()
         self._load_into_form()
         if not self._main_ready:
@@ -974,10 +1118,163 @@ class ApacBotApp(ctk.CTk):
             win.apply_rows(snap.rows)
             win.present()
             return
-        win = RelatorioLoteWindow(self, title=f"{APP_NAME} — Relatório do lote")
+        win = RelatorioLoteWindow(
+            self,
+            title=f"{APP_NAME} — Relatório do lote",
+            on_export_cliente=self._export_relatorio_cliente,
+        )
         win.apply_rows(snap.rows)
         self._relatorio_win = win
         win.present()
+
+    def _export_relatorio_cliente(self) -> None:
+        """Gera relatório de cliente (PDF/xlsx/csv) a partir do SET staging + falhas.
+
+        Não pede arquivo SET: usa lote_atual.SET interno. I/O pesado roda em
+        thread para não travar a UI (planilha glaucoma).
+        """
+        from apac_bot.relatorio_apac import (
+            RelatorioApac,
+            carregar_fila_e_progresso,
+            export_relatorio_csv,
+            export_relatorio_pdf,
+            export_relatorio_xlsx,
+            montar_relatorio_de_arquivos,
+            nome_arquivo_relatorio_cliente,
+        )
+        from apac_bot.set_layout import SetLayoutError
+        from apac_bot.set_pipeline import caminho_staging
+
+        if self._export_cliente_busy:
+            return
+
+        parent = self._relatorio_win if (
+            self._relatorio_win is not None and self._relatorio_win.is_open
+        ) else self
+
+        try:
+            cfg = load_config(self._resolve_config_path())
+        except (ConfigError, OSError) as exc:
+            messagebox.showerror("Exportar para cliente", str(exc), parent=parent)
+            return
+
+        staging = caminho_staging(cfg)
+        if not staging.is_file():
+            messagebox.showwarning(
+                "Exportar para cliente",
+                "Nenhum lote SET gerado ainda.\n"
+                "Execute «Iniciar» antes de exportar o relatório.",
+                parent=parent,
+            )
+            return
+
+        planilha = self._ui_planilha_path()
+        if planilha is not None:
+            cfg = cfg.with_planilha(planilha)
+
+        self._export_cliente_busy = True
+        if self._relatorio_win is not None and self._relatorio_win.is_open:
+            self._relatorio_win.set_export_cliente_busy(True)
+        self._append_log("[UI] Gerando relatório para cliente…\n")
+
+        def _finish_busy() -> None:
+            self._export_cliente_busy = False
+            if self._relatorio_win is not None and self._relatorio_win.is_open:
+                self._relatorio_win.set_export_cliente_busy(False)
+
+        def _on_montar_ok(relatorio: RelatorioApac) -> None:
+            dest_parent = self._relatorio_win if (
+                self._relatorio_win is not None and self._relatorio_win.is_open
+            ) else self
+            destino = filedialog.asksaveasfilename(
+                parent=dest_parent,
+                title="Salvar relatório para cliente",
+                defaultextension=".pdf",
+                initialfile=nome_arquivo_relatorio_cliente(relatorio),
+                filetypes=[
+                    ("PDF", "*.pdf"),
+                    ("Excel", "*.xlsx"),
+                    ("CSV", "*.csv"),
+                    ("Todos", "*.*"),
+                ],
+            )
+            if not destino:
+                _finish_busy()
+                return
+            dest = Path(destino)
+            suffix = dest.suffix.lower()
+            if suffix not in {".pdf", ".xlsx", ".csv"}:
+                dest = dest.with_suffix(".pdf")
+                suffix = ".pdf"
+
+            def write_worker() -> None:
+                try:
+                    if suffix == ".csv":
+                        export_relatorio_csv(dest, relatorio)
+                    elif suffix == ".xlsx":
+                        export_relatorio_xlsx(dest, relatorio)
+                    else:
+                        export_relatorio_pdf(dest, relatorio)
+                except (OSError, ModuleNotFoundError) as exc:
+                    err_msg = f"Falha ao salvar:\n{exc}"
+
+                    def _fail(msg: str = err_msg) -> None:
+                        _finish_busy()
+                        messagebox.showerror(
+                            "Exportar para cliente",
+                            msg,
+                            parent=dest_parent,
+                        )
+
+                    self.after(0, _fail)
+                    return
+
+                def _ok() -> None:
+                    _finish_busy()
+                    self._append_log(
+                        f"[UI] Relatório cliente exportado: {dest}\n"
+                    )
+                    messagebox.showinfo(
+                        "Exportar para cliente",
+                        f"Arquivo salvo em:\n{dest}",
+                        parent=dest_parent,
+                    )
+
+                self.after(0, _ok)
+
+            threading.Thread(target=write_worker, daemon=True).start()
+
+        def _on_montar_err(msg: str) -> None:
+            _finish_busy()
+            messagebox.showerror(
+                "Exportar para cliente",
+                msg,
+                parent=parent,
+            )
+
+        def montar_worker() -> None:
+            try:
+                fila, progress, mapa_glauc = carregar_fila_e_progresso(
+                    cfg, planilha_override=planilha
+                )
+                relatorio = montar_relatorio_de_arquivos(
+                    cfg,
+                    staging,
+                    fila,
+                    progress,
+                    mapa_glaucoma=mapa_glauc,
+                )
+            except (SheetError, SetLayoutError, OSError, ConfigError) as exc:
+                err = str(exc)
+                self.after(0, lambda m=err: _on_montar_err(m))
+                return
+            except Exception as exc:  # noqa: BLE001 — UI worker
+                err = f"Falha ao montar relatório:\n{exc}"
+                self.after(0, lambda m=err: _on_montar_err(m))
+                return
+            self.after(0, lambda r=relatorio: _on_montar_ok(r))
+
+        threading.Thread(target=montar_worker, daemon=True).start()
 
     def _ui_planilha_path(self) -> Optional[Path]:
         """Path da planilha no campo da UI; None se vazio ou arquivo inexistente."""
@@ -1302,7 +1599,19 @@ class ApacBotApp(ctk.CTk):
             messagebox.showerror("Salvar", str(exc))
             return
 
-        cmd = [sys.executable, "-m", "apac_bot", command, "--config", str(path)]
+        from apac_bot.runtime_paths import is_frozen
+
+        if is_frozen():
+            cmd = [sys.executable, command, "--config", str(path)]
+        else:
+            cmd = [
+                sys.executable,
+                "-m",
+                "apac_bot",
+                command,
+                "--config",
+                str(path),
+            ]
         self._append_log(f"[UI] > {' '.join(cmd)}\n")
         self._set_job_running(True)
 

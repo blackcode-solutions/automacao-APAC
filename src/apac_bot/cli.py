@@ -9,13 +9,42 @@ if __name__ == "__main__" and str(Path(__file__).resolve().parents[1]) not in sy
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from apac_bot.apac import ApacBlockedError, dump_apac_screen, open_apac_session
-from apac_bot.config import ConfigError, load_config
+from apac_bot.config import AppConfig, ConfigError, load_config
 from apac_bot.connectors.biodata import BiodataMappingError, open_biodata_session
 from apac_bot.connectors.biodata_api import BiodataApiError
+from apac_bot.license import LicenseError, ensure_license
 from apac_bot.logging_safe import setup_logging
 from apac_bot.pipeline import PipelineError, cmd_fetch, cmd_run, cmd_status
 from apac_bot.set_pipeline import cmd_gerar_set
 from apac_bot.sheet import SheetError, create_example_workbook
+
+# Comandos que exigem licença ativa (ou grace offline).
+_LICENSE_GATED = frozenset(
+    {
+        "validate",
+        "fetch",
+        "run",
+        "status",
+        "open-biodata",
+        "open-apac",
+        "gerar-set",
+        "dump-apac-screen",
+    }
+)
+
+
+def _require_license(cfg: AppConfig, log) -> int | None:
+    """Retorna código de saída se bloqueado; None se ok."""
+    try:
+        result = ensure_license(cfg)
+    except LicenseError as exc:
+        log.error("[license] %s", exc)
+        return 2
+    if result.source == "cache":
+        log.warning("[license] %s", result.message)
+    elif result.source == "online":
+        log.info("[license] %s", result.message)
+    return None
 
 
 def _add_config_arg(parser: argparse.ArgumentParser) -> None:
@@ -141,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", exc)
         return 2
 
+    if args.command in _LICENSE_GATED:
+        blocked = _require_license(cfg, log)
+        if blocked is not None:
+            return blocked
+
     planilha = Path(args.planilha) if getattr(args, "planilha", None) else None
 
     try:
@@ -179,6 +213,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except (ConfigError, SheetError, PipelineError) as exc:
         log.error("%s", exc)
+        return 2
+    except LicenseError as exc:
+        log.error("[license] %s", exc)
         return 2
     except KeyboardInterrupt:
         log.error("Interrompido pelo usuário (Ctrl+C).")

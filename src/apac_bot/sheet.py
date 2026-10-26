@@ -192,6 +192,251 @@ def carregar_mapa_prontuario(cfg: AppConfig) -> dict[str, str]:
         wb.close()
 
 
+def codigo_procedimento_chave(codigo: Any) -> str:
+    """Só dígitos do código (alinha SET com zeros à esquerda e planilha sem)."""
+    return "".join(ch for ch in cell_as_text(codigo) if ch.isdigit()).lstrip("0") or "0"
+
+
+def _parse_honor_valor(raw: Any) -> Optional[float]:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = cell_as_text(raw).strip()
+    if not text:
+        return None
+    # Aceita 112.77, 112,77 ou R$ 1.234,56
+    limpo = (
+        text.replace("R$", "")
+        .replace("r$", "")
+        .strip()
+        .replace(" ", "")
+    )
+    if "," in limpo and "." in limpo:
+        limpo = limpo.replace(".", "").replace(",", ".")
+    elif "," in limpo:
+        limpo = limpo.replace(",", ".")
+    try:
+        return float(limpo)
+    except ValueError:
+        return None
+
+
+def carregar_mapa_honorarios(cfg: AppConfig) -> dict[tuple[str, str], float]:
+    """
+    Lê planilha_prontuarios: (nome_chave, codigo_digitos) -> Honor($).
+    Retorna {} se não configurado / arquivo ausente / colunas não achadas.
+    """
+    bloco = cfg.planilha_prontuarios
+    if not bloco or not bloco.get("caminho"):
+        return {}
+
+    caminho = resolve_path(config_dir(cfg), Path(str(bloco["caminho"])))
+    if not caminho.is_file():
+        log.warning("planilha_prontuarios nao encontrada (honorarios): %s", caminho)
+        return {}
+
+    aba = str(bloco.get("aba") or "APAC ").strip() or "APAC "
+    aba_cfg = str(bloco.get("aba") or "APAC ")
+    try:
+        header_row = int(bloco.get("linha_cabecalho") or 3)
+    except (TypeError, ValueError):
+        header_row = 3
+    colunas = dict(bloco.get("colunas") or {})
+    rotulo_cli = str(colunas.get("CLIENTE") or "Cliente")
+    rotulo_cod = str(colunas.get("CODIGO") or "Código")
+    rotulo_honor = str(colunas.get("HONOR") or "Honor($)")
+
+    wb = load_workbook(caminho, read_only=True, data_only=True)
+    try:
+        ws = None
+        for nome in wb.sheetnames:
+            if (
+                nome == aba_cfg
+                or nome.strip() == aba
+                or nome.casefold() == aba_cfg.casefold()
+            ):
+                ws = wb[nome]
+                break
+        if ws is None:
+            log.warning(
+                "Aba prontuarios %r nao encontrada para honorarios em %s",
+                aba_cfg,
+                caminho.name,
+            )
+            return {}
+
+        headers_raw: list[Any] = []
+        for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+            if i == header_row:
+                headers_raw = list(row or ())
+                break
+        if not headers_raw:
+            return {}
+
+        def _hdr_key(h: Any) -> str:
+            return nome_chave_prontuario(cell_as_text(h))
+
+        alvo_cli = _hdr_key(rotulo_cli)
+        alvo_cod = _hdr_key(rotulo_cod)
+        alvo_honor = _hdr_key(rotulo_honor)
+        idx_cli = idx_cod = idx_honor = None
+        for j, h in enumerate(headers_raw):
+            k = _hdr_key(h)
+            if k == alvo_cli or k == "cliente":
+                idx_cli = j
+            if k == alvo_cod or k in {"codigo", "cod"}:
+                idx_cod = j
+            if (
+                k == alvo_honor
+                or k.startswith("honor")
+                or "honor" in k
+            ):
+                idx_honor = j
+        if idx_cli is None or idx_cod is None or idx_honor is None:
+            log.warning(
+                "Colunas Cliente/Codigo/Honor nao achadas no cabecalho %s",
+                [cell_as_text(h) for h in headers_raw],
+            )
+            return {}
+
+        mapa: dict[tuple[str, str], float] = {}
+        for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+            if not row:
+                continue
+            nome = cell_as_text(row[idx_cli] if idx_cli < len(row) else "").strip()
+            cod = codigo_procedimento_chave(
+                row[idx_cod] if idx_cod < len(row) else ""
+            )
+            honor = _parse_honor_valor(
+                row[idx_honor] if idx_honor < len(row) else None
+            )
+            if not nome or honor is None:
+                continue
+            chave = (nome_chave_prontuario(nome), cod)
+            if chave not in mapa:
+                mapa[chave] = honor
+        log.info(
+            "Mapa honorarios: %s chave(s) carregada(s) de %s",
+            len(mapa),
+            caminho.name,
+        )
+        return mapa
+    finally:
+        wb.close()
+
+
+@dataclass(frozen=True, slots=True)
+class MapaPreviaGlaucoma:
+    """Prévia glaucoma: Valor (Total Conta) por nome+código e por numeração (Guia)."""
+
+    por_nome_cod: dict[tuple[str, str], float]
+    por_numeracao: dict[str, float]
+
+
+def _numeracao_guia_digitos(raw: Any) -> str:
+    return "".join(ch for ch in cell_as_text(raw) if ch.isdigit())
+
+
+def mapa_previa_glaucoma_de_lancamentos(
+    lancamentos: list[Lancamento] | tuple[Lancamento, ...],
+) -> MapaPreviaGlaucoma:
+    """Monta mapa de Valor (Total Conta) a partir de lançamentos já lidos (sem reabrir xlsx)."""
+    por_nome: dict[tuple[str, str], float] = {}
+    por_num: dict[str, float] = {}
+    for lanc in lancamentos:
+        raw = (lanc.extras or {}).get("valor_total_conta")
+        if not isinstance(raw, (int, float)):
+            continue
+        valor = float(raw)
+        nome = (lanc.paciente_nome or "").strip()
+        codigo = (lanc.codigo_apac or lanc.codigo_original or "").strip()
+        if nome:
+            chave_nc = (
+                nome_chave_prontuario(nome),
+                codigo_procedimento_chave(codigo),
+            )
+            if chave_nc not in por_nome:
+                por_nome[chave_nc] = valor
+        guia = _numeracao_guia_digitos(
+            lanc.numeracao_original or lanc.numeracao_apac or ""
+        )
+        if guia and guia not in por_num:
+            por_num[guia] = valor
+    return MapaPreviaGlaucoma(por_nome_cod=por_nome, por_numeracao=por_num)
+
+
+def carregar_mapa_previa_glaucoma(
+    cfg: AppConfig,
+    *,
+    planilha_override: Optional[Path] = None,
+) -> MapaPreviaGlaucoma:
+    """
+    Lê abas Base Consultas / TRAT * e monta mapas de Valor (Total Conta).
+    Retorna mapas vazios se arquivo/abas/colunas ausentes.
+    """
+    base = config_dir(cfg)
+    caminho = planilha_override or resolve_path(base, cfg.planilha_caminho)
+    if not caminho.is_file():
+        log.warning("planilha glaucoma nao encontrada (previa): %s", caminho)
+        return MapaPreviaGlaucoma(por_nome_cod={}, por_numeracao={})
+
+    wb = load_workbook(caminho, read_only=True, data_only=True)
+    try:
+        abas = _abas_faturamento_glaucoma(list(wb.sheetnames))
+        if not abas:
+            return MapaPreviaGlaucoma(por_nome_cod={}, por_numeracao={})
+        try:
+            abas = _resolver_abas_glaucoma(abas, cfg.planilha_aba_glaucoma)
+        except SheetError as exc:
+            log.warning("Mapa previa glaucoma: %s", exc)
+            return MapaPreviaGlaucoma(por_nome_cod={}, por_numeracao={})
+
+        por_nome: dict[tuple[str, str], float] = {}
+        por_num: dict[str, float] = {}
+        for nome_aba in abas:
+            ws = wb[nome_aba]
+            headers = _header_map(ws, header_row=1)
+            idx_cli = _indice_coluna_glaucoma(headers, _GLAUCOMA_COLUNAS["cliente"])
+            idx_cod = _indice_coluna_glaucoma(headers, _GLAUCOMA_COLUNAS["codigo"])
+            idx_val = _indice_coluna_glaucoma(
+                headers, _GLAUCOMA_COLUNAS["valor_total"]
+            )
+            idx_guia = _indice_coluna_glaucoma(headers, _GLAUCOMA_COLUNAS["guia"])
+            if idx_cli is None or idx_cod is None or idx_val is None:
+                log.warning(
+                    "Aba glaucoma %r sem Cliente/Codigo/Valor (Total Conta)",
+                    nome_aba,
+                )
+                continue
+            max_row = ws.max_row or 2
+            for row in range(2, max_row + 1):
+                paciente = _cell(ws, row, idx_cli)
+                codigo = _cell(ws, row, idx_cod)
+                valor = _parse_honor_valor(_cell(ws, row, idx_val))
+                if not paciente or valor is None:
+                    continue
+                chave_nc = (
+                    nome_chave_prontuario(paciente),
+                    codigo_procedimento_chave(codigo),
+                )
+                if chave_nc not in por_nome:
+                    por_nome[chave_nc] = valor
+                if idx_guia is not None:
+                    guia = _numeracao_guia_digitos(_cell(ws, row, idx_guia))
+                    if guia and guia not in por_num:
+                        por_num[guia] = valor
+        log.info(
+            "Mapa previa glaucoma: %s nome+cod, %s numeracao(s) de %s",
+            len(por_nome),
+            len(por_num),
+            caminho.name,
+        )
+        return MapaPreviaGlaucoma(por_nome_cod=por_nome, por_numeracao=por_num)
+    finally:
+        wb.close()
+
+
 def enriquecer_prontuario(lanc: Lancamento, mapa: dict[str, str]) -> Lancamento:
     """Preenche lanc.prontuario pelo nome se ainda vazio."""
     if lanc.prontuario:
@@ -295,6 +540,12 @@ _GLAUCOMA_COLUNAS: dict[str, tuple[str, ...]] = {
         "Cód./Procedimento",
         "Cod./Procedimento",
     ),
+    "valor_total": (
+        "Valor (Total Conta)",
+        "Valor Total Conta",
+        "Valor (Total)",
+        "Valor Total",
+    ),
     "associado": ("Associado a", "Associados a", "Associado"),
     "guia": ("Chave (Guia)", "Guia"),
     "atendimento": (
@@ -341,14 +592,24 @@ def listar_abas_faturamento_glaucoma(caminho: Path) -> list[str]:
 
 
 def _resolver_abas_glaucoma(
-    abas: list[str], _aba_escolhida: str = ""
+    abas: list[str], aba_escolhida: str = ""
 ) -> list[str]:
     """
-    Todas as abas de faturamento descobertas no xlsx.
+    Filtra abas de faturamento pela escolha da UI/config.
 
-    _aba_escolhida é ignorado (legado); o Iniciar sempre processa a lista completa.
+    aba_escolhida vazia («Todas as abas») → lista completa.
+    Nome específico → só essa aba (match case-insensitive); senão SheetError.
     """
-    return list(abas)
+    escolhida = (aba_escolhida or "").strip()
+    if not escolhida:
+        return list(abas)
+    lower = {a.casefold(): a for a in abas}
+    hit = lower.get(escolhida.casefold())
+    if hit is None:
+        raise SheetError(
+            f"Aba glaucoma '{escolhida}' não encontrada entre: {', '.join(abas)}"
+        )
+    return [hit]
 
 
 def _indice_coluna_glaucoma(
@@ -442,6 +703,12 @@ def _ler_aba_faturamento_glaucoma(
             for c in extrair_codigos_associados(associado_bruto)
         ]
 
+        valor_bruto = _cell(ws, row, indices.get("valor_total"))
+        valor_num = _parse_honor_valor(valor_bruto)
+        extras: dict[str, Any] = {}
+        if valor_num is not None:
+            extras["valor_total_conta"] = valor_num
+
         lancamentos.append(
             Lancamento(
                 clinica_id=cfg.clinica_id,
@@ -457,6 +724,7 @@ def _ler_aba_faturamento_glaucoma(
                 validade=optional_text(fixos.get("validade")),
                 linha_planilha=row,
                 codigos_associados=associados,
+                extras=extras,
             )
         )
 
@@ -467,8 +735,9 @@ def _load_lancamentos_glaucoma(
     cfg: AppConfig, planilha_override: Optional[Path] = None
 ) -> SheetValidation:
     """
-    Leitor do CENARIO glaucoma: todas as abas Base Consultas / TRAT *
-    descobertas no xlsx (nomes variam por arquivo). Número da APAC = Chave (Guia).
+    Leitor do CENARIO glaucoma: abas Base Consultas / TRAT * no xlsx.
+    Se planilha.aba_glaucoma estiver preenchida, processa só essa aba;
+    vazia («Todas as abas») processa todas. Número da APAC = Chave (Guia).
     """
     base = config_dir(cfg)
     caminho = planilha_override or resolve_path(base, cfg.planilha_caminho)
@@ -485,7 +754,7 @@ def _load_lancamentos_glaucoma(
                 f"(esperado 'Base Consultas' e/ou 'TRAT …'). "
                 f"Disponíveis: {wb.sheetnames}"
             )
-        abas = _resolver_abas_glaucoma(abas)
+        abas = _resolver_abas_glaucoma(abas, cfg.planilha_aba_glaucoma)
 
         erros: list[str] = []
         avisos: list[str] = [

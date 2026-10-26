@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Clínicas — Licenças SIS DG{% endblock %}
+{% block content %}
+{% include "_public_url.html" %}
+<div class="card">
+  <h1 style="margin-top:0">Clínicas</h1>
+  <p class="muted">Ative/suspenda após o Pix. A clínica usa <span class="mono">clinica_id</span> + <span class="mono">license_key</span> no app (URL do servidor fica no config).</p>
+  {% if clinics %}
+  <table>
+    <thead>
+      <tr>
+        <th>Nome</th>
+        <th>ID</th>
+        <th>Status</th>
+        <th>Válida até</th>
+        <th>Último check</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in clinics %}
+      <tr>
+        <td>{{ c.nome }}</td>
+        <td class="mono">{{ c.clinica_id }}</td>
+        <td><span class="badge badge-{{ c.status }}">{{ c.status }}</span></td>
+        <td class="mono">{{ c.valid_until[:10] }}</td>
+        <td class="mono">{{ c.last_seen_at[:19] if c.last_seen_at else "—" }}</td>
+        <td><a class="btn btn-secondary" href="/admin/{{ c.clinica_id }}">Editar</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Nenhuma clínica cadastrada. <a href="/admin/new">Criar a primeira</a>.</p>
+  {% endif %}
+</div>
+{% endblock %}

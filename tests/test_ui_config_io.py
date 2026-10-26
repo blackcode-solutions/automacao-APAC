@@ -457,3 +457,44 @@ def test_validate_sisac_sem_clinica_cadastrada():
     form = _form_ok(sistema_origem="sisac", clinica_id="")
     erros = validate_form(form)
     assert any("Nenhuma clínica" in e or "clínica" in e.lower() for e in erros)
+
+
+def test_merge_form_nao_altera_bloco_licenca():
+    raw = _base_raw()
+    raw["licenca"] = {
+        "server_url": "https://lic.exemplo",
+        "license_key": "antiga",
+        "grace_dias": 7,
+    }
+    form = _form_ok()
+    merged = merge_form_into_raw(raw, form)
+    assert merged["licenca"]["server_url"] == "https://lic.exemplo"
+    assert merged["licenca"]["license_key"] == "antiga"
+    assert merged["licenca"]["grace_dias"] == 7
+
+
+def test_save_license_key_preserva_server_url(tmp_path: Path):
+    from apac_bot.ui.config_io import save_license_key
+
+    cfg = tmp_path / "config.json"
+    raw = _base_raw()
+    raw["licenca"] = {
+        "server_url": "https://lic.exemplo",
+        "license_key": "antiga",
+        "grace_dias": 14,
+    }
+    cfg.write_text(json.dumps(raw), encoding="utf-8")
+    save_license_key(cfg, "  nova-chave  ")
+    saved = json.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["licenca"]["license_key"] == "nova-chave"
+    assert saved["licenca"]["server_url"] == "https://lic.exemplo"
+    assert saved["licenca"]["grace_dias"] == 14
+
+
+def test_save_license_key_vazia_erro(tmp_path: Path):
+    from apac_bot.ui.config_io import save_license_key
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps(_base_raw()), encoding="utf-8")
+    with pytest.raises(ConfigIoError, match="chave"):
+        save_license_key(cfg, "  ")

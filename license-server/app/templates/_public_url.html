@@ -1,0 +1,38 @@
+{% if public_url %}
+<div class="card" style="margin-bottom:1rem">
+  <p class="muted" style="margin-top:0">URL do servidor (cole em <span class="mono">licenca.server_url</span> no config da clínica):</p>
+  <div class="key-row">
+    <code id="public-server-url" class="mono">{{ public_url }}</code>
+    <button type="button" class="btn btn-secondary btn-copy" id="btn-copy-url">Copiar</button>
+  </div>
+</div>
+<script>
+(function () {
+  var btn = document.getElementById("btn-copy-url");
+  var el = document.getElementById("public-server-url");
+  if (!btn || !el) return;
+  btn.addEventListener("click", function () {
+    var text = (el.textContent || "").trim();
+    function ok() {
+      var prev = btn.textContent;
+      btn.textContent = "Copiado!";
+      setTimeout(function () { btn.textContent = prev; }, 1500);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok).catch(function () {
+        window.prompt("Copie a URL:", text);
+      });
+    } else {
+      window.prompt("Copie a URL:", text);
+    }
+  });
+})();
+</script>
+{% else %}
+<div class="card" style="margin-bottom:1rem">
+  <p class="muted" style="margin:0">
+    Defina <span class="mono">LICENSE_PUBLIC_URL</span> no ambiente para exibir aqui
+    a URL que a clínica deve usar em <span class="mono">licenca.server_url</span>.
+  </p>
+</div>
+{% endif %}

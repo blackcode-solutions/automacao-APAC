@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}{{ "Editar" if clinic else "Nova" }} clínica — Licenças{% endblock %}
+{% block content %}
+{% include "_public_url.html" %}
+<div class="card">
+  <h1 style="margin-top:0">{{ "Editar clínica" if clinic else "Nova clínica" }}</h1>
+  <form method="post" action="{{ action }}">
+    <div class="row">
+      <div>
+        <label for="clinica_id">ID da clínica (clinica_id)</label>
+        <input id="clinica_id" name="clinica_id" required
+               value="{{ clinic.clinica_id if clinic else '' }}"
+               {% if clinic %}readonly{% endif %}>
+      </div>
+      <div>
+        <label for="nome">Nome</label>
+        <input id="nome" name="nome" required value="{{ clinic.nome if clinic else '' }}">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="status">Status</label>
+        <select id="status" name="status">
+          {% for s in statuses %}
+          <option value="{{ s }}" {% if clinic and clinic.status == s %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="valid_until">Válida até (YYYY-MM-DD)</label>
+        <input id="valid_until" name="valid_until" required
+               value="{{ (clinic.valid_until[:10] if clinic else default_until) }}">
+      </div>
+    </div>
+    {% if clinic %}
+    <p class="muted">Chave atual:</p>
+    <div class="key-row">
+      <code id="license-key" class="mono">{{ clinic.license_key }}</code>
+      <button type="button" class="btn btn-secondary btn-copy" id="btn-copy-key">Copiar</button>
+    </div>
+    <label>
+      <input type="checkbox" name="regenerate_key" value="1" style="width:auto; margin-right:0.4rem">
+      Regenerar license_key (invalida a chave anterior)
+    </label>
+    {% endif %}
+    <div class="actions">
+      <button type="submit">Salvar</button>
+      <a class="btn btn-secondary" href="/admin">Voltar</a>
+      {% if clinic %}
+      <button class="btn-danger" type="submit" formaction="/admin/{{ clinic.clinica_id }}/delete"
+              onclick="return confirm('Excluir esta clínica?');">Excluir</button>
+      {% endif %}
+    </div>
+  </form>
+</div>
+{% if clinic %}
+<script>
+(function () {
+  var btn = document.getElementById("btn-copy-key");
+  var el = document.getElementById("license-key");
+  if (!btn || !el) return;
+  btn.addEventListener("click", function () {
+    var text = el.textContent || "";
+    function ok() {
+      var prev = btn.textContent;
+      btn.textContent = "Copiado!";
+      setTimeout(function () { btn.textContent = prev; }, 1500);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok).catch(function () {
+        window.prompt("Copie a chave:", text);
+      });
+    } else {
+      window.prompt("Copie a chave:", text);
+    }
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

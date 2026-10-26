@@ -151,6 +151,11 @@ class AppConfig:
         return Path(prog.get("caminho_db", "data/progress.db"))
 
     @property
+    def licenca(self) -> dict[str, Any]:
+        """Bloco de licença online (server_url, license_key, grace_dias)."""
+        return dict(self.raw.get("licenca") or {})
+
+    @property
     def diagnostico(self) -> dict[str, Any]:
         return dict(self.raw.get("diagnostico") or {})
 

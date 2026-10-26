@@ -19,6 +19,10 @@ data/*.xlsx
 !data/planilha_exemplo.xlsx
 data/progress.db
 data/*.db
+data/license_cache.json
+license-server/data/
+license-server/.venv/
+license-server/.env
 browser_profile/
 browser_profile_*/
 capturas/

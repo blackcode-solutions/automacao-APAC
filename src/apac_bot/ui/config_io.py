@@ -151,6 +151,9 @@ PLANILHA_PRONTUARIOS_DEFAULTS: dict[str, Any] = {
     "colunas": {
         "PRONTUARIO": "Prontuário",
         "CLIENTE": "Cliente",
+        "CODIGO": "Código",
+        "HONOR": "Honor($)",
+        "QTD": "Qtd",
     },
 }
 
@@ -245,7 +248,9 @@ class ConfigIoError(Exception):
 
 
 def default_config_path() -> Path:
-    return Path.cwd() / "config.json"
+    from apac_bot.runtime_paths import app_dir
+
+    return app_dir() / "config.json"
 
 
 def load_raw(path: Path) -> dict[str, Any]:
@@ -412,6 +417,8 @@ def merge_form_into_raw(raw: dict[str, Any], form: UiFormData) -> dict[str, Any]
         else:
             fixos[key] = valor
     out["dados_fixos"] = fixos
+
+    # Bloco licenca (server_url / license_key) não é editado pelo form principal.
     return out
 
 
@@ -465,6 +472,29 @@ def save_modalidade(path: Path, modalidade: str) -> str:
         encoding="utf-8",
     )
     return codigo
+
+
+def save_license_key(path: Path, license_key: str) -> str:
+    """
+    Grava só licenca.license_key (tela de ativação).
+    Preserva server_url / grace_dias; não valida o formulário principal.
+    """
+    if not path.is_file():
+        raise ConfigIoError(f"Arquivo de configuração não encontrado: {path}")
+    key = str(license_key or "").strip()
+    if not key:
+        raise ConfigIoError("Informe a chave de licença.")
+    raw = load_raw(path)
+    licenca = dict(raw.get("licenca") or {})
+    licenca["license_key"] = key
+    licenca.setdefault("server_url", "")
+    licenca.setdefault("grace_dias", 14)
+    raw["licenca"] = licenca
+    path.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return key
 
 
 def secrets_missing(config_path: Path) -> bool:

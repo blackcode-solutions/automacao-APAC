@@ -242,9 +242,15 @@ class LotePanel(ctk.CTkFrame):
 
 
 class RelatorioLoteWindow(ctk.CTkToplevel):
-    """Janela com status e motivo por lançamento; exportação CSV."""
+    """Janela com status e motivo por lançamento; CSV operacional + export cliente."""
 
-    def __init__(self, master: ctk.CTk, *, title: str = "Relatório do lote") -> None:
+    def __init__(
+        self,
+        master: ctk.CTk,
+        *,
+        title: str = "Relatório do lote",
+        on_export_cliente: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(master)
         self.title(title)
         self.geometry("1120x520")
@@ -253,6 +259,8 @@ class RelatorioLoteWindow(ctk.CTkToplevel):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
+        self._on_export_cliente = on_export_cliente
+        self._btn_export_cliente: ctk.CTkButton | None = None
         self._rows: tuple[LoteRow, ...] = ()
         self._filtered_rows: tuple[LoteRow, ...] = ()
         self._closed = False
@@ -336,16 +344,40 @@ class RelatorioLoteWindow(ctk.CTkToplevel):
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
         actions.grid_columnconfigure(0, weight=1)
+        col = 1
+        if self._on_export_cliente is not None:
+            self._btn_export_cliente = theme.btn_secondary(
+                actions,
+                "Exportar para cliente",
+                command=self._on_export_cliente,
+                width=170,
+            )
+            self._btn_export_cliente.grid(row=0, column=col, padx=(0, 8))
+            col += 1
         theme.btn_secondary(
             actions, "Exportar CSV", command=self._export_csv, width=130
-        ).grid(row=0, column=1, padx=(0, 8))
+        ).grid(row=0, column=col, padx=(0, 8))
+        col += 1
         theme.btn_primary(actions, "Fechar", command=self._on_close, width=100).grid(
-            row=0, column=2
+            row=0, column=col
         )
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.transient(master)
         self.after(50, self.present)
+
+    def set_export_cliente_busy(self, busy: bool) -> None:
+        """Desabilita o botão durante montagem/gravação do relatório cliente."""
+        btn = self._btn_export_cliente
+        if btn is None:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+            btn.configure(state="disabled" if busy else "normal")
+        except Exception:
+            # Janela fechada durante export em background
+            return
 
     def present(self) -> None:
         if self._closed:

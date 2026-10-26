@@ -161,6 +161,11 @@
   "progresso": {
     "caminho_db": "data/progress.db"
   },
+  "licenca": {
+    "server_url": "",
+    "license_key": "20744435-73cc-462d-ab29-059f51afa56d",
+    "grace_dias": 14
+  },
   "diagnostico": {
     "capturar_tela": false,
     "pasta_capturas": "capturas"

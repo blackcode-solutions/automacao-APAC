@@ -262,14 +262,36 @@ Se houver interrupção durante um passo de salvamento, o estado fica `salvament
 7. Só então evolua o mapeamento e um lote pequeno.  
 
 
-## 8. Privacidade e Git
+## 8. Licença (clínicas)
 
-Não versionados (ver `.gitignore`): `config.json`, planilhas reais, `progress.db`, `browser_profile/`, capturas, logs.
+O app valida acesso via `LICENSE_MODE` em `src/apac_bot/license.py`:
+
+- **`local`** (atual): chave embutida + data de corte (`LOCAL_VALID_UNTIL`); **não** chama a API. `server_url` é ignorado.
+- **`online`**: valida contra o **license-server** (`license-server/`).
+
+No `config.json` (instalação):
+
+```json
+"licenca": {
+  "server_url": "https://seu-servidor.exemplo",
+  "license_key": "uuid-enviado-pelo-admin",
+  "grace_dias": 14
+}
+```
+
+- Modo online: `server_url` no JSON (copie do painel admin). Com `server_url` **vazio**, a checagem fica desligada (dev/legado).
+- Após a splash, se a licença falhar, abre a tela **Ativar licença**. A tela principal só abre com licença ok.
+- Modo online sem rede: cache assinado por até `grace_dias`.
+- Painel admin e deploy: ver [`license-server/README.md`](license-server/README.md).
+
+## 9. Privacidade e Git
+
+Não versionados (ver `.gitignore`): `config.json`, planilhas reais, `progress.db`, `license_cache.json`, `browser_profile/`, capturas, logs, `license-server/data/`.
 
 Logs usam identidade interna (hash curto), sem CPF/CNS/nome completo.  
 Capturas de tela só se `diagnostico.capturar_tela=true` (desligado por padrão; a v1 não grava automaticamente).
 
-## 9. Mapeamentos ainda pendentes
+## 10. Mapeamentos ainda pendentes
 
 - Localizadores HTML do BIODATA  
 - Sequência completa de teclas do APAC após o CPF (auditor, procedimento, competência, save)  
@@ -277,12 +299,50 @@ Capturas de tela só se `diagnostico.capturar_tela=true` (desligado por padrão;
 - Significado da coluna `QUANT.`  
 - Quais `dados_fixos` (CNES, validade, etc.) são realmente fixos por clínica  
 
-## 10. Estrutura
+## 11. Build Windows (executável + Setup)
+
+Gera pasta `dist\SIS-DG-APAC\` (PyInstaller **onedir**) e o instalador `dist\SIS-DG-APAC-Setup.exe` (Inno Setup 6). O Chromium do Playwright **não** entra no pacote. Ícone: `packaging/sis-dg-apac.ico` (monograma DG em `src/apac_bot/ui/assets/icon_dg.png` — regenere o `.ico` se a arte mudar).
+
+Pré-requisitos de build:
+
+- `.venv` criado e pacote instalado (`-e .`)
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`ISCC.exe`) — ou `winget install --id JRSoftware.InnoSetup -e`
+
+```powershell
+.\scripts\build_exe.ps1
+# Só pasta onedir (sem Setup):
+.\scripts\build_exe.ps1 -SkipSetup
+```
+
+Saída:
+
+- `dist\SIS-DG-APAC-Setup.exe` — instalador (Program Files, atalhos, desinstalador)
+- `dist\SIS-DG-APAC\SIS-DG-APAC.exe` — pasta onedir (também usable sem Setup)
+- `config.example.json` e `LEIA-ME.txt` na pasta do app
+
+No PC alvo (após o Setup ou cópia da pasta):
+
+1. Copie `config.example.json` → `config.json` ao lado do exe e ajuste.
+2. Instale o Chromium uma vez (BIODATA):
+
+```powershell
+# Em uma máquina com Python + playwright (ex. o .venv do build):
+.\.venv\Scripts\python.exe -m playwright install chromium
+```
+
+Os browsers ficam no perfil do usuário. Se o exe não achar o Chromium, defina `PLAYWRIGHT_BROWSERS_PATH` para essa pasta (ver saída do `playwright install`).
+
+Sem args o exe abre a UI; `config.json` padrão fica **ao lado do .exe** (não depende do cwd do atalho).
+
+## 12. Estrutura
 
 ```
 src/apac_bot/          # CLI e módulos
   ui/                  # Interface desktop (CustomTkinter)
   connectors/          # mock + biodata
+packaging/             # PyInstaller + Inno Setup (.iss, ícone, wizard)
+scripts/build_exe.ps1
+license-server/        # API + painel de licenças
 data/planilha_exemplo.xlsx
 config.example.json
 tests/
