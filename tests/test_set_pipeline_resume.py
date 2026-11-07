@@ -67,7 +67,6 @@ def _cfg(tmp_path: Path, *, limite: int = 0) -> AppConfig:
         "export_set": {
             "limite_pacientes": limite,
             "pasta_saida": str(tmp_path / "export_set"),
-            "competencia_padrao": "202609",
             "orgao_origem": "CLINICA DE SERVICOS MEDICOS GE",
             "sigla": "CSMG",
             "cgc": "01192155000210",

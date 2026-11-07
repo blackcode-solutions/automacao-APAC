@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from datetime import date
+
 from apac_bot.set_layout import (
     CabecalhoSet,
     CidGeralSet,
@@ -11,6 +13,7 @@ from apac_bot.set_layout import (
     PacienteSetRecord,
     ProcedimentoSet,
     calcular_smt_vrf,
+    competencia_mes_anterior,
     datas_competencia,
     montar_arquivo,
     montar_cabecalho,
@@ -363,3 +366,10 @@ def test_datas_competencia_glaucoma_virada_de_ano():
 def test_ultimo_dia_mes_fevereiro_bissexto():
     assert ultimo_dia_mes(2024, 2, 0).strftime("%Y%m%d") == "20240229"
     assert ultimo_dia_mes(2023, 12, 2).strftime("%Y%m%d") == "20240229"
+
+
+def test_competencia_mes_anterior():
+    assert competencia_mes_anterior(date(2026, 11, 7)) == "202610"
+    assert competencia_mes_anterior(date(2026, 10, 15)) == "202609"
+    assert competencia_mes_anterior(date(2027, 1, 10)) == "202612"
+    assert competencia_mes_anterior(date(2026, 3, 1)) == "202602"

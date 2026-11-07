@@ -63,7 +63,6 @@ def _cfg(
         },
         "export_set": {
             "orgao_origem": "CLINICA DE SERVICOS MEDICOS GE",
-            "competencia_padrao": "202609",
         },
     }
     if honor_path is not None:

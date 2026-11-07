@@ -5,7 +5,7 @@ Pipeline gerar-set: planilha + BIODATA -> arquivo staging .SET (sem APAC.exe).
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,7 +42,7 @@ from apac_bot.set_layout import (
     PacienteSetRecord,
     ProcedimentoSet,
     SetLayoutError,
-    competencia_aaaamm,
+    competencia_mes_anterior,
     data_geracao_hoje,
     datas_competencia,
     montar_arquivo,
@@ -219,21 +219,35 @@ def _gravar_set_arquivos(
     return staging
 
 
-def _competencia_lanc(lanc: Lancamento, fallback: str) -> str:
-    raw = (lanc.competencia or "").strip()
-    if raw:
-        try:
-            return competencia_aaaamm(raw)
-        except SetLayoutError:
-            digits = "".join(ch for ch in raw if ch.isdigit())
-            if len(digits) >= 6:
-                return digits[:6]
-    if fallback:
-        return competencia_aaaamm(fallback)
-    raise SetLayoutError(
-        f"competencia ausente para {lanc.paciente_nome!r} — "
-        "preencha na planilha ou export_set.competencia_padrao"
+def _records_atualizar_competencia(
+    records: list[PacienteSetRecord],
+    competencia: str,
+    *,
+    modalidade: str,
+) -> list[PacienteSetRecord]:
+    """Reaplica competência e datas do lote nos registros já montados (retomada)."""
+    ini, fim = datas_competencia(
+        competencia, fim_offset_meses=fim_offset_meses(modalidade)
     )
+    _, fim_competencia = datas_competencia(competencia, fim_offset_meses=0)
+    atualizados: list[PacienteSetRecord] = []
+    for rec in records:
+        corpo = replace(
+            rec.corpo,
+            competencia=competencia,
+            data_proc=ini,
+            data_ini_val=ini,
+            data_fim_val=fim,
+            data_obito_alta=fim_competencia,
+            data_solicitacao=ini,
+            data_autorizacao=ini,
+        )
+        cid = replace(rec.cid, competencia=competencia)
+        procs = tuple(replace(p, competencia=competencia) for p in rec.procedimentos)
+        atualizados.append(
+            PacienteSetRecord(corpo=corpo, cid=cid, procedimentos=procs)
+        )
+    return atualizados
 
 
 def _logradouro_limpo(pac: PacienteDados) -> str:
@@ -473,20 +487,32 @@ def cmd_gerar_set(
     store = _store(cfg)
     checkpoint = carregar_checkpoint(cfg)
     retomando = checkpoint is not None
+    competencia_exec = competencia_mes_anterior()
     if retomando:
-        competencia_lote, records = checkpoint
+        comp_checkpoint, records = checkpoint
         records = list(records)
         fila, pulados, _alterados = filtrar_pendentes_lote(fila, store)
+        if comp_checkpoint != competencia_exec:
+            log.warning(
+                "[gerar-set] competência do checkpoint (%s) atualizada para %s",
+                comp_checkpoint,
+                competencia_exec,
+            )
+            records = _records_atualizar_competencia(
+                records, competencia_exec, modalidade=cfg.modalidade
+            )
+        competencia_lote = competencia_exec
         log.info(
             "[gerar-set] retomando lote incompleto: checkpoint=%s "
-            "pendente(s)=%s pulado(s)=%s",
+            "pendente(s)=%s pulado(s)=%s competencia=%s",
             len(records),
             len(fila),
             len(pulados),
+            competencia_lote,
         )
     else:
         records = []
-        competencia_lote = None
+        competencia_lote = competencia_exec
 
     ok = 0
     revisao = 0
@@ -527,12 +553,9 @@ def cmd_gerar_set(
 
             lanc.paciente = paciente
             try:
-                comp = _competencia_lanc(
-                    lanc, _export(cfg, "competencia_padrao", "")
+                rec = montar_record_paciente(
+                    cfg, lanc, competencia=competencia_lote
                 )
-                if competencia_lote is None:
-                    competencia_lote = comp
-                rec = montar_record_paciente(cfg, lanc, competencia=comp)
                 records.append(rec)
                 store.upsert(
                     lanc,

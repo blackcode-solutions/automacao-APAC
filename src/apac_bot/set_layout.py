@@ -7,7 +7,7 @@ Gera bytes latin-1 com CRLF e SUB (0x1A) no fim, como o Magnético exporta.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, Sequence
 
 from apac_bot.config import MODALIDADE_GLAUCOMA, normalizar_modalidade_cfg
@@ -66,6 +66,17 @@ def competencia_aaaamm(valor: Optional[str]) -> str:
     if len(s) == 8:
         return s[:6]
     raise SetLayoutError(f"competencia invalida (esperado AAAAMM): {valor!r}")
+
+
+def competencia_mes_anterior(hoje: Optional[date] = None) -> str:
+    """
+    Competência do lote SET: mês civil imediatamente anterior a ``hoje`` (AAAAMM).
+    Ex.: hoje em nov/2026 → ``202610``; em jan/2027 → ``202612``.
+    """
+    ref = hoje or date.today()
+    ultimo_mes_ant = ref.replace(day=1) - timedelta(days=1)
+    comp = f"{ultimo_mes_ant.year}{ultimo_mes_ant.month:02d}"
+    return competencia_aaaamm(comp)
 
 
 def ultimo_dia_mes(ano: int, mes: int, offset_meses: int = 0) -> date:

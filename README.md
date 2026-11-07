@@ -349,3 +349,5 @@ tests/
 ```
 
 A UI grava os campos dinâmicos, as duas planilhas (`planilha.caminho` e `planilha_prontuarios.caminho`) e `paciente_inicio` no `config.json` (merge seguro: não apaga `biodata`, timeouts etc.) ao clicar em **Iniciar**. Ações na tela: iniciar, cancelar e exportar o `.SET`. Validar/status ficam no CLI. Credenciais continuam em `secrets.local.json`.
+
+**Export SET/TXT:** a competência do lote é o **mês civil anterior** à data de geração (ex.: em novembro → `AAAAMM` com mês 10). O nome do arquivo segue a competência (`APOFTA10.OUT`, `APGLAU09.SET`, etc.).

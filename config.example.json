@@ -124,7 +124,6 @@
   "export_set": {
     "limite_pacientes": 0,
     "pasta_saida": "data/export_set",
-    "competencia_padrao": "202609",
     "orgao_origem": "CLINICA DE SERVICOS MEDICOS GE",
     "sigla": "CSMG",
     "cgc": "01192155000210",

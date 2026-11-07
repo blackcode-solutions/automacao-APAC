@@ -22,7 +22,12 @@ from apac_bot.config import (
 from apac_bot.models import Lancamento
 from apac_bot.normalize import nascimento_ddmmaaaa
 from apac_bot.progress import ProgressRecord, ProgressStore
-from apac_bot.set_layout import SetLayoutError, competencia_aaaamm, ultimo_dia_mes
+from apac_bot.set_layout import (
+    SetLayoutError,
+    competencia_aaaamm,
+    competencia_mes_anterior,
+    ultimo_dia_mes,
+)
 from apac_bot.set_parse import (
     ParsedPaciente,
     ParsedProc,
@@ -471,9 +476,7 @@ def montar_relatorio(
     mapa_glaucoma: Optional[MapaPreviaGlaucoma] = None,
 ) -> RelatorioApac:
     """Une SET (SEM ERROS) + lançamentos do lote ausentes do SET (COM ERROS)."""
-    competencia = parsed.competencia or str(
-        cfg.export_set.get("competencia_padrao") or ""
-    )
+    competencia = parsed.competencia or competencia_mes_anterior()
     meta = _meta_from_cfg(cfg, competencia=competencia, gerado_em=gerado_em)
     ref = (
         ref_idade_competencia(competencia)

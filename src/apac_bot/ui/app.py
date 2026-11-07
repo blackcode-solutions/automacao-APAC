@@ -1522,7 +1522,7 @@ class ApacBotApp(ctk.CTk):
     def _export_set(self) -> None:
         """Copia o staging para o destino escolhido pelo usuario."""
         from apac_bot.config import load_config
-        from apac_bot.set_layout import nome_arquivo_set
+        from apac_bot.set_layout import competencia_mes_anterior, nome_arquivo_set
         from apac_bot.set_pipeline import caminho_staging
 
         try:
@@ -1545,7 +1545,7 @@ class ApacBotApp(ctk.CTk):
         except OSError:
             comp = ""
         if not comp:
-            comp = str(cfg.export_set.get("competencia_padrao") or "202609")
+            comp = competencia_mes_anterior()
         default_name = nome_arquivo_set(comp, cfg.modalidade)
         ext = Path(default_name).suffix or ".SET"
         destino = filedialog.asksaveasfilename(

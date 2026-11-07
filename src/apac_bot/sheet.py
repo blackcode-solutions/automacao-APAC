@@ -720,7 +720,6 @@ def _ler_aba_faturamento_glaucoma(
                 paciente_nome=paciente,
                 prontuario=optional_text(prontuario),
                 quant="1",
-                competencia=optional_text(fixos.get("competencia")),
                 validade=optional_text(fixos.get("validade")),
                 linha_planilha=row,
                 codigos_associados=associados,
@@ -904,7 +903,6 @@ def load_lancamentos(
                 paciente_nome=paciente,
                 id_paciente=optional_text(id_paciente),
                 quant=optional_text(quant),
-                competencia=optional_text(fixos.get("competencia")),
                 validade=optional_text(fixos.get("validade")),
                 linha_planilha=row,
             )
