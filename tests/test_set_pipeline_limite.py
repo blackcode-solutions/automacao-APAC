@@ -200,7 +200,8 @@ def test_save_form_preserva_biodata_e_export_set(tmp_path: Path):
     raw = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert raw["biodata"]["url"] == "https://keep.me"
     assert raw["export_set"]["limite_pacientes"] == 5
-    # CID oculto por modalidade (padrão H250); serviço/classif só no config.
-    assert raw["dados_fixos"]["cid_principal"] == "H250"
-    assert "cid_principal" in DADOS_FIXOS_UI_KEYS
+    # Padrão: CID por planilha/sufixo — não força H250 no save; legado preservado.
+    assert raw["dados_fixos"].get("cid_principal") == "H250"
+    assert "cid_principal" not in DADOS_FIXOS_UI_KEYS
+    assert "codigo_procedimento" in DADOS_FIXOS_UI_KEYS
     assert "codigo_servico" not in DADOS_FIXOS_UI_KEYS

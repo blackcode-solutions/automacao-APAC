@@ -1,7 +1,11 @@
 from pathlib import Path
 
 from apac_bot.models import EstadoLancamento, Lancamento
-from apac_bot.progress import ProgressStore, filtrar_pendentes_lote
+from apac_bot.progress import (
+    ProgressStore,
+    filtrar_falhas_lote,
+    filtrar_pendentes_lote,
+)
 
 
 def _lanc(num: str = "123-4", auditor: str = "AUD01") -> Lancamento:
@@ -76,6 +80,23 @@ def test_filtrar_pendentes_pula_concluidos(tmp_path: Path):
     assert len(pulados) == 1
     assert pulados[0][0].paciente_nome == "AAA"
     assert "concluído" in pulados[0][1]
+    assert alterados == []
+
+
+def test_filtrar_falhas_lote_somente_erro_e_revisao(tmp_path: Path):
+    store = ProgressStore(tmp_path / "p.db")
+    a = _lanc("111-1")
+    b = _lanc("222-2")
+    c = _lanc("333-3")
+    d = _lanc("444-4")
+    store.upsert(a, EstadoLancamento.CONCLUIDO, motivo="ok")
+    store.upsert(b, EstadoLancamento.ERRO, motivo="falha")
+    store.upsert(c, EstadoLancamento.AGUARDANDO_REVISAO, motivo="dados")
+    store.upsert(d, EstadoLancamento.PENDENTE, motivo="")
+
+    falhas, pulados, alterados = filtrar_falhas_lote([a, b, c, d], store)
+    assert {l.numeracao_original for l in falhas} == {"222-2", "333-3"}
+    assert len(pulados) == 2
     assert alterados == []
 
 

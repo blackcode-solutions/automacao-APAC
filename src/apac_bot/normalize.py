@@ -85,12 +85,27 @@ CEPS_INVALIDOS_APAC = frozenset({
     "65055485",
 })
 
+# CEPs conhecidos (BIODATA) remapeados para outro válido — não usam CEP_PADRAO_APAC.
+CEP_SUBSTITUICOES_APAC: dict[str, str] = {
+    "65040084": "65763000",
+    "65042357": "65763000",
+    "65095886": "65763000",
+    "65052120": "65763000",
+    "66666666": "65763000",
+}
+
 
 def cep_para_apac(valor: Optional[str]) -> str:
-    """CEP de 8 dígitos da origem, ou CEP_PADRAO_APAC se ausente/inválido."""
+    """
+    CEP de 8 dígitos da origem; substituições em CEP_SUBSTITUICOES_APAC;
+    inválidos genéricos → CEP_PADRAO_APAC; ausente/curto → CEP_PADRAO_APAC.
+    """
     digitos = "".join(ch for ch in str(valor or "") if ch.isdigit())
     if len(digitos) >= 8:
         cep = digitos[:8]
+        substituto = CEP_SUBSTITUICOES_APAC.get(cep)
+        if substituto is not None:
+            return substituto
         if cep in CEPS_INVALIDOS_APAC:
             return CEP_PADRAO_APAC
         return cep

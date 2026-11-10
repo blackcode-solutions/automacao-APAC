@@ -9,12 +9,12 @@ import sys
 import threading
 from pathlib import Path
 from tkinter import PhotoImage, filedialog, messagebox
-from typing import Optional
+from typing import Any, Optional
 
 import customtkinter as ctk
 from PIL import Image
 
-from apac_bot.config import ConfigError, load_config
+from apac_bot.config import AppConfig, ConfigError, load_config
 from apac_bot.license import LicenseError, ensure_license, license_enabled
 from apac_bot.sheet import SheetError, listar_abas_faturamento_glaucoma
 from apac_bot.ui import theme
@@ -45,9 +45,12 @@ from apac_bot.ui.config_io import (
 )
 from apac_bot.ui.lote_data import (
     LoteSnapshot,
+    contagem_falhas_completar,
     linhas_com_problema,
     load_lote_snapshot,
+    reset_lote_operacional,
     snapshot_sem_planilha,
+    tem_falhas_completar,
 )
 from apac_bot.ui.lote_panel import (
     HistoricoLogWindow,
@@ -135,6 +138,7 @@ class ApacBotApp(ctk.CTk):
         self._log_queue: queue.Queue[str] = queue.Queue()
         self._log_buffer: list[str] = []
         self._job_running = False
+        self._reenvio_pendentes_em_execucao = False
         self._lote_panel: Optional[LotePanel] = None
         self._historico_win: Optional[HistoricoLogWindow] = None
         self._relatorio_win: Optional[RelatorioLoteWindow] = None
@@ -150,6 +154,7 @@ class ApacBotApp(ctk.CTk):
         self._resize_after_id: Optional[str] = None
         self._last_bg_size: tuple[int, int] = (0, 0)
         self._main_ready = False
+        self._planilha_path_ultimo_reset: str = ""
         self._modalidade = MODALIDADE_PADRAO
         self._dados_fixos_cache: dict[str, str] = {}
         self._secoes_host: Optional[ctk.CTkFrame] = None
@@ -669,6 +674,21 @@ class ApacBotApp(ctk.CTk):
             inner_actions, "Ver arquivo parcial", command=self._show_set_preview
         )
         self.btn_preview_set.grid(row=0, column=3, padx=(0, 0), pady=0, sticky="ew")
+        self.btn_completar_erros = theme.btn_secondary(
+            inner_actions,
+            "Enviar pacientes pendentes",
+            command=self._run_completar_erros,
+            state="disabled",
+        )
+        self.btn_completar_erros.grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            padx=0,
+            pady=(6, 0),
+            sticky="ew",
+        )
+        self._last_lote_snap: Optional[LoteSnapshot] = None
         self._sync_action_buttons_for_modalidade()
 
         # Fora do body scrollável — evita CTkScrollableFrame aninhado (ghosting no Windows).
@@ -754,12 +774,86 @@ class ApacBotApp(ctk.CTk):
         btn_iniciar = getattr(self, "btn_open_apac", None)
         btn_export = getattr(self, "btn_export_set", None)
         btn_preview = getattr(self, "btn_preview_set", None)
+        btn_completar = getattr(self, "btn_completar_erros", None)
         if btn_iniciar is None or btn_export is None:
             return
         btn_iniciar.configure(state="normal")
         btn_export.configure(state="normal")
         if btn_preview is not None:
             btn_preview.configure(state="normal")
+        if btn_completar is not None:
+            pode, _ = self._pode_reenviar_falhas()
+            btn_completar.configure(state="normal" if pode else "disabled")
+        self._sync_relatorio_reenviar_btn()
+
+    def _pode_reenviar_falhas(self) -> tuple[bool, str]:
+        if self._job_running:
+            return False, "Aguarde o comando em execução terminar."
+        snap = self._last_lote_snap
+        if snap is None or not tem_falhas_completar(snap.rows):
+            return (
+                False,
+                "Não há pacientes em Erro ou Em revisão.\n"
+                "Corrija os dados no BIODATA e use «Enviar pacientes pendentes» "
+                "depois do «Iniciar».",
+            )
+        staging = self._staging_path_for_preview()
+        if staging is None or not staging.is_file():
+            return (
+                False,
+                "Nenhum arquivo parcial (lote_atual.SET).\n"
+                "Execute «Iniciar» antes.",
+            )
+        return True, ""
+
+    def _sync_relatorio_reenviar_btn(self) -> None:
+        win = self._relatorio_win
+        if win is None or not win.is_open:
+            return
+        pode, _ = self._pode_reenviar_falhas()
+        win.set_enviar_pendentes_enabled(pode)
+
+    def _run_reenviar_pacientes_pendentes(self, *, parent: Any = None) -> None:
+        dlg_parent = parent if parent is not None else self
+        pode, motivo = self._pode_reenviar_falhas()
+        if not pode:
+            if "Erro ou Em revisão" in motivo:
+                messagebox.showinfo(
+                    "Enviar pacientes pendentes", motivo, parent=dlg_parent
+                )
+            elif "lote_atual" in motivo:
+                messagebox.showwarning(
+                    "Enviar pacientes pendentes", motivo, parent=dlg_parent
+                )
+            else:
+                messagebox.showinfo(
+                    "Enviar pacientes pendentes", motivo, parent=dlg_parent
+                )
+            return
+        snap = self._last_lote_snap
+        n = contagem_falhas_completar(snap.rows) if snap is not None else 0
+        if not messagebox.askyesno(
+            "Enviar pacientes pendentes",
+            f"Reconsultar o BIODATA e gravar no mesmo arquivo SET para "
+            f"{n} paciente(s) em Erro ou Em revisão?\n\n"
+            "Concluídos não serão processados de novo.",
+            parent=dlg_parent,
+        ):
+            return
+        self._append_log("[UI] Reenvio de pendentes iniciado.\n")
+        self._reenvio_pendentes_em_execucao = True
+        rel = self._relatorio_win
+        if rel is not None and rel.is_open:
+            rel.set_acoes_busy(True)
+        self._run_cli("gerar-set", extra_args=["--somente-falhas"])
+
+    def _run_reenviar_from_relatorio(self) -> None:
+        win = self._relatorio_win
+        parent = win if win is not None and win.is_open else self
+        self._run_reenviar_pacientes_pendentes(parent=parent)
+
+    def _run_completar_erros(self) -> None:
+        self._run_reenviar_pacientes_pendentes()
 
     def _add_fields_grid(
         self,
@@ -1113,18 +1207,22 @@ class ApacBotApp(ctk.CTk):
 
     def _show_relatorio(self) -> None:
         snap = load_lote_snapshot(self._resolve_config_path())
+        self._last_lote_snap = snap
         win = self._relatorio_win
         if win is not None and win.is_open:
             win.apply_rows(snap.rows)
+            self._sync_relatorio_reenviar_btn()
             win.present()
             return
         win = RelatorioLoteWindow(
             self,
             title=f"{APP_NAME} — Relatório do lote",
             on_export_cliente=self._export_relatorio_cliente,
+            on_enviar_pendentes=self._run_reenviar_from_relatorio,
         )
         win.apply_rows(snap.rows)
         self._relatorio_win = win
+        self._sync_relatorio_reenviar_btn()
         win.present()
 
     def _export_relatorio_cliente(self) -> None:
@@ -1276,6 +1374,65 @@ class ApacBotApp(ctk.CTk):
 
         threading.Thread(target=montar_worker, daemon=True).start()
 
+    @staticmethod
+    def _normalizar_path_planilha(path: str) -> str:
+        raw = path.strip()
+        if not raw:
+            return ""
+        p = Path(raw)
+        try:
+            resolved = str(p.resolve())
+        except OSError:
+            resolved = raw
+        if sys.platform == "win32":
+            return resolved.casefold()
+        return resolved
+
+    def _planilha_path_texto_ui(self) -> str:
+        entry = self._entries.get("planilha_caminho")
+        texto = ""
+        if entry is not None:
+            try:
+                texto = entry.get().strip()
+            except Exception as exc:
+                log.debug("[ui] leitura planilha_caminho: %s", exc)
+                texto = ""
+        if not texto:
+            texto = getattr(self, "_planilha_caminho_cache", "") or ""
+            texto = texto.strip()
+        return texto
+
+    def _cfg_para_reset_lote(self) -> AppConfig:
+        cfg = load_config(self._resolve_config_path())
+        texto = self._planilha_path_texto_ui()
+        if texto:
+            cfg = cfg.with_planilha(texto)
+        return cfg
+
+    def _reset_lote_operacional_se_necessario(self, *, nova_sessao: bool = False) -> None:
+        if self._job_running:
+            return
+        path_efetivo = self._normalizar_path_planilha(self._planilha_path_texto_ui())
+        deve = nova_sessao or (
+            bool(path_efetivo) and path_efetivo != self._planilha_path_ultimo_reset
+        )
+        if not deve:
+            return
+        try:
+            cfg = self._cfg_para_reset_lote()
+            removed = reset_lote_operacional(cfg)
+        except (ConfigError, OSError) as exc:
+            log.warning("[lote-reset] falha ao reiniciar lote: %s", exc)
+            self._append_log(f"[UI] Não foi possível reiniciar o lote: {exc}\n")
+            return
+        self._planilha_path_ultimo_reset = path_efetivo
+        if removed > 0:
+            self._append_log(
+                f"[UI] Lote reiniciado — progresso anterior apagado ({removed} registro(s)).\n"
+            )
+        else:
+            self._append_log("[UI] Lote reiniciado — painel sem progresso anterior.\n")
+
     def _ui_planilha_path(self) -> Optional[Path]:
         """Path da planilha no campo da UI; None se vazio ou arquivo inexistente."""
         entry = self._entries.get("planilha_caminho")
@@ -1323,6 +1480,14 @@ class ApacBotApp(ctk.CTk):
             aba_glaucoma_override=aba,
         )
         panel.apply_snapshot(snap)
+        self._last_lote_snap = snap
+        rel = self._relatorio_win
+        if rel is not None and rel.is_open:
+            rel.apply_rows(snap.rows)
+        if not self._job_running:
+            self._sync_action_buttons_for_modalidade()
+        else:
+            self._sync_relatorio_reenviar_btn()
         return snap
 
     def _stop_lote_poll(self) -> None:
@@ -1426,6 +1591,7 @@ class ApacBotApp(ctk.CTk):
         else:
             self.lbl_aviso.configure(text="")
         self._append_log(f"[UI] Config carregada: {path}\n")
+        self._reset_lote_operacional_se_necessario(nova_sessao=True)
         self._refresh_lote_panel()
 
     def _browse_planilha(self) -> None:
@@ -1447,6 +1613,7 @@ class ApacBotApp(ctk.CTk):
                 path,
                 preferida=self._planilha_aba_glaucoma_cache,
             )
+        self._reset_lote_operacional_se_necessario(nova_sessao=False)
         self._refresh_lote_panel(
             planilha_override=Path(path),
             aba_glaucoma_override=(
@@ -1475,14 +1642,29 @@ class ApacBotApp(ctk.CTk):
         self._job_running = running
         self.btn_cancel.configure(state="normal" if running else "disabled")
         if running:
-            for btn in (self.btn_open_apac, self.btn_export_set):
-                btn.configure(state="disabled")
+            for btn in (
+                self.btn_open_apac,
+                self.btn_export_set,
+                getattr(self, "btn_completar_erros", None),
+            ):
+                if btn is not None:
+                    btn.configure(state="disabled")
+            rel = self._relatorio_win
+            if rel is not None and rel.is_open:
+                rel.set_acoes_busy(True)
             self._refresh_lote_panel()
             self._schedule_lote_poll()
         else:
             self._sync_action_buttons_for_modalidade()
             self._stop_lote_poll()
             snap = self._refresh_lote_panel()
+            rel = self._relatorio_win
+            if rel is not None and rel.is_open:
+                rel.set_acoes_busy(False)
+                self._sync_relatorio_reenviar_btn()
+            if self._reenvio_pendentes_em_execucao:
+                self._append_log("[UI] Reenvio de pendentes concluído.\n")
+                self._reenvio_pendentes_em_execucao = False
             if snap is not None and linhas_com_problema(snap.rows):
                 self._show_relatorio()
 
@@ -1580,7 +1762,12 @@ class ApacBotApp(ctk.CTk):
         except OSError as exc:
             self._append_log(f"[UI] Falha ao cancelar: {exc}\n")
 
-    def _run_cli(self, command: str) -> None:
+    def _run_cli(
+        self,
+        command: str,
+        *,
+        extra_args: Optional[list[str]] = None,
+    ) -> None:
         if self._job_running:
             messagebox.showwarning("Aguarde", "Já existe um comando em execução.")
             return
@@ -1601,8 +1788,9 @@ class ApacBotApp(ctk.CTk):
 
         from apac_bot.runtime_paths import is_frozen
 
+        extras = list(extra_args or [])
         if is_frozen():
-            cmd = [sys.executable, command, "--config", str(path)]
+            cmd = [sys.executable, command, "--config", str(path), *extras]
         else:
             cmd = [
                 sys.executable,
@@ -1611,6 +1799,7 @@ class ApacBotApp(ctk.CTk):
                 command,
                 "--config",
                 str(path),
+                *extras,
             ]
         self._append_log(f"[UI] > {' '.join(cmd)}\n")
         self._set_job_running(True)

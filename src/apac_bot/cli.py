@@ -128,6 +128,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override de export_set.limite_pacientes",
     )
+    p_set.add_argument(
+        "--somente-falhas",
+        "--completar-erros",
+        action="store_true",
+        dest="somente_falhas",
+        help="Reprocessa só ERRO/AGUARDANDO_REVISAO e mescla no SET parcial",
+    )
 
     p_dump = sub.add_parser(
         "dump-apac-screen",
@@ -203,7 +210,12 @@ def main(argv: list[str] | None = None) -> int:
             open_apac_session(cfg)
             return 0
         if args.command == "gerar-set":
-            return cmd_gerar_set(cfg, planilha=planilha, limit=args.limit)
+            return cmd_gerar_set(
+                cfg,
+                planilha=planilha,
+                limit=args.limit,
+                somente_falhas=bool(getattr(args, "somente_falhas", False)),
+            )
         if args.command == "dump-apac-screen":
             path = dump_apac_screen(cfg)
             log.info("Dump concluido: %s", path)

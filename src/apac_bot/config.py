@@ -81,7 +81,7 @@ class AppConfig:
 
     @property
     def planilha_aba(self) -> str:
-        return str(self.raw["planilha"]["aba"])
+        return str((self.raw.get("planilha") or {}).get("aba") or "").strip()
 
     @property
     def planilha_aba_glaucoma(self) -> str:
@@ -222,7 +222,7 @@ def validate_config(
     planilha = cfg.raw.get("planilha") or {}
     if not planilha.get("caminho"):
         erros.append("planilha.caminho é obrigatório.")
-    if not planilha.get("aba"):
+    if not planilha.get("aba") and cfg.modalidade != MODALIDADE_PADRAO:
         erros.append("planilha.aba é obrigatória.")
 
     colunas = planilha.get("colunas") or {}

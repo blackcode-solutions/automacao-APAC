@@ -110,6 +110,7 @@ def test_ui_secoes_tela_flatten():
     flatten = tuple(key for _titulo, keys in UI_SECOES_TELA for key in keys)
     assert DADOS_FIXOS_UI_KEYS == (
         flatten
+        + ("codigo_procedimento",)
         + tuple(DADOS_FIXOS_PADRAO_OCULTOS.keys())
         + (
             "autorizador_cns",
@@ -176,11 +177,14 @@ def test_merge_forca_cod_orgao_emiss_por_modalidade():
     assert merged_g["dados_fixos"]["cod_orgao_emiss"] == "E210000001"
 
 
-def test_merge_forca_cid_principal_por_modalidade():
+def test_merge_cid_principal_padrao_preserva_legado_json():
+    """Padrão: CID não vem mais da UI — merge não sobrescreve o JSON."""
+    raw = _base_raw()
+    raw["dados_fixos"]["cid_principal"] = "H250"
     form_padrao = _form_ok(
         modalidade=MODALIDADE_PADRAO, cid_principal="H401"
     )
-    merged_p = merge_form_into_raw(_base_raw(), form_padrao)
+    merged_p = merge_form_into_raw(raw, form_padrao)
     assert merged_p["dados_fixos"]["cid_principal"] == "H250"
 
     form_glau = _form_ok(
@@ -188,6 +192,19 @@ def test_merge_forca_cid_principal_por_modalidade():
     )
     merged_g = merge_form_into_raw(_base_raw(), form_glau)
     assert merged_g["dados_fixos"]["cid_principal"] == "H401"
+
+
+def test_padrao_secoes_sem_codigo_procedimento():
+    secoes = secoes_para_modalidade(MODALIDADE_PADRAO)
+    flatten = tuple(key for _titulo, keys in secoes for key in keys)
+    assert "codigo_procedimento" not in flatten
+    assert "cid_principal" not in DADOS_FIXOS_PADRAO_OCULTOS
+
+
+def test_glaucoma_secoes_com_codigo_procedimento():
+    secoes = secoes_para_modalidade(MODALIDADE_GLAUCOMA)
+    flatten = tuple(key for _titulo, keys in secoes for key in keys)
+    assert "codigo_procedimento" in flatten
 
 
 def test_orgao_emiss_municipal_estadual():
@@ -236,7 +253,10 @@ def test_secoes_glaucoma_tres_cards_sem_tipo_apac():
     secoes = secoes_para_modalidade(MODALIDADE_GLAUCOMA)
     assert secoes == (
         ("Identificação", ("cnes_solicitante", "cnes_executante")),
-        ("Procedimentos", ("cbo", "cns_executante")),
+        (
+            "Procedimentos",
+            ("codigo_procedimento", "cbo", "cns_executante"),
+        ),
         (
             "Solicitação / Autorização",
             ("medico_solicitante_cns", "medico_solicitante_nome"),

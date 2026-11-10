@@ -1,13 +1,17 @@
 """Testes do merge planilha + progresso para o painel de lote."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from apac_bot.models import EstadoLancamento, Lancamento
 from apac_bot.progress import ProgressRecord
 from apac_bot.sheet import create_example_workbook
+from apac_bot.config import load_config
+from apac_bot.set_pipeline import caminho_checkpoint, caminho_staging
 from apac_bot.ui.lote_data import (
     MSG_ANEXAR_PLANILHA,
+    contagem_falhas_completar,
     contar_por_estado,
     export_lote_csv,
     filtrar_linhas_lote,
@@ -15,8 +19,10 @@ from apac_bot.ui.lote_data import (
     linhas_com_problema,
     load_lote_snapshot,
     merge_lote_rows,
+    reset_lote_operacional,
     snapshot_sem_planilha,
     status_label,
+    tem_falhas_completar,
 )
 
 
@@ -217,6 +223,43 @@ def test_load_snapshot_paciente_inicio_vazio_carrega_preview(
     assert "paciente_inicio" not in (snap.erro or "").lower()
 
 
+def test_contagem_falhas_completar():
+    from apac_bot.ui.lote_data import LoteRow
+
+    rows = (
+        LoteRow(
+            identidade="a",
+            prontuario="",
+            nome="A",
+            numero_apac="1",
+            estado=EstadoLancamento.CONCLUIDO,
+            motivo="",
+            highlight=False,
+        ),
+        LoteRow(
+            identidade="b",
+            prontuario="",
+            nome="B",
+            numero_apac="2",
+            estado=EstadoLancamento.ERRO,
+            motivo="x",
+            highlight=False,
+        ),
+        LoteRow(
+            identidade="c",
+            prontuario="",
+            nome="C",
+            numero_apac="3",
+            estado=EstadoLancamento.AGUARDANDO_REVISAO,
+            motivo="y",
+            highlight=True,
+        ),
+    )
+    assert contagem_falhas_completar(rows) == 2
+    assert tem_falhas_completar(rows) is True
+    assert tem_falhas_completar(rows[:1]) is False
+
+
 def test_snapshot_sem_planilha_vazio_com_mensagem():
     snap = snapshot_sem_planilha()
     assert snap.rows == ()
@@ -225,3 +268,33 @@ def test_snapshot_sem_planilha_vazio_com_mensagem():
     assert snap.erro is None
     assert snap.mensagem_tabela == MSG_ANEXAR_PLANILHA
     assert "anexe a planilha" in snap.mensagem_tabela.casefold()
+
+
+def test_reset_lote_operacional_limpa_db_checkpoint_staging(tmp_path: Path):
+    cfg_path = _cfg_json_for_lote(tmp_path)
+    raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    raw.setdefault("export_set", {})["pasta_saida"] = str(tmp_path / "export_set")
+    cfg_path.write_text(json.dumps(raw), encoding="utf-8")
+    cfg = load_config(cfg_path)
+
+    from apac_bot.ui.lote_data import _store as lote_store
+
+    store = lote_store(cfg)
+    lanc = replace(_lanc("999-9"), clinica_id=cfg.clinica_id)
+    store.upsert(lanc, EstadoLancamento.CONCLUIDO, motivo="incluido")
+    assert len(store.list_by_clinica(cfg.clinica_id)) == 1
+
+    staging = caminho_staging(cfg)
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_text("SET interno", encoding="utf-8")
+    ck = caminho_checkpoint(cfg)
+    ck.write_text(
+        '{"incompleto": true, "competencia": "202601", "records": []}',
+        encoding="utf-8",
+    )
+
+    removed = reset_lote_operacional(cfg)
+    assert removed == 1
+    assert store.list_by_clinica(cfg.clinica_id) == []
+    assert not staging.is_file()
+    assert not ck.is_file()

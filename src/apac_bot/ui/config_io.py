@@ -26,10 +26,10 @@ UI_SECOES_TELA: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Identificação",
         ("cnes_solicitante", "cnes_executante"),
     ),
+    # codigo_procedimento vem da coluna COD. na planilha (por paciente).
     (
         "Procedimentos",
         (
-            "codigo_procedimento",
             "cbo",
             "cns_executante",
         ),
@@ -43,8 +43,8 @@ UI_SECOES_TELA: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
-# Seções da APAC Glaucoma (mesmo layout; tipo_apac forçado nos ocultos).
-# codigo_procedimento vem da planilha (Código + Associado a), não da UI.
+# Seções da APAC Glaucoma (tipo_apac forçado nos ocultos).
+# APAC Padrão não exibe codigo_procedimento — vem da coluna COD. da planilha.
 UI_SECOES_GLAUCOMA: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Identificação",
@@ -53,6 +53,7 @@ UI_SECOES_GLAUCOMA: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Procedimentos",
         (
+            "codigo_procedimento",
             "cbo",
             "cns_executante",
         ),
@@ -73,7 +74,6 @@ DADOS_FIXOS_PADRAO_OCULTOS: dict[str, str] = {
     "motivo_saida": "12",
     "carater_atend": "01",
     "cod_orgao_emiss": "M211130001",  # Municipal
-    "cid_principal": "H250",
 }
 
 # Valores fixos da APAC Glaucoma — fora da UI.
@@ -85,9 +85,13 @@ DADOS_FIXOS_GLAUCOMA_OCULTOS: dict[str, str] = {
     "cid_principal": "H401",
 }
 
+# Chaves só na UI Glaucoma (persistidas no save; Padrão não exibe o controle).
+DADOS_FIXOS_UI_KEYS_GLAUCOMA: tuple[str, ...] = ("codigo_procedimento",)
+
 # Flatten das seções + ocultos + campos com controles especiais fora da grade.
 DADOS_FIXOS_UI_KEYS: tuple[str, ...] = (
     tuple(key for _titulo, keys in UI_SECOES_TELA for key in keys)
+    + DADOS_FIXOS_UI_KEYS_GLAUCOMA
     + tuple(DADOS_FIXOS_PADRAO_OCULTOS.keys())
     + ("autorizador_cns", "autorizador_nome")
 )

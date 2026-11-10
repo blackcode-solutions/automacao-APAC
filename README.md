@@ -51,6 +51,8 @@ São **duas planilhas** no disco (a UI permite escolher os caminhos):
 
 Não é preciso “anexar” arquivo no sentido de upload: a automação lê os `.xlsx` do caminho informado. Se o cabeçalho da planilha de lançamentos não estiver na linha 1, use `planilha.linha_cabecalho`. Aba/colunas da planilha de prontuários ficam no `config.json` (padrão: aba `APAC `, cabeçalho na linha 3).
 
+No **APAC Padrão**, a aba de lançamentos é escolhida **automaticamente** ao validar ou rodar o lote: abas cujo nome contém “PRODUÇÃO APAC”, mês/ano no **nome do arquivo** (ex.: `APAC OUTUBRO 2026.xlsx`) e colunas obrigatórias no cabeçalho. `planilha.aba` é **opcional** e serve só como dica se houver mais de uma aba válida; não precisa atualizar a aba ao trocar o `.xlsx` na UI.
+
 Com `planilha.apenas_ativos: true` (padrão), o bot processa **só as linhas visíveis** no Excel — ou seja, as que o filtro da planilha deixa ativas. Linhas ocultas pelo AutoFilter são ignoradas. Para ler a planilha inteira, use `"apenas_ativos": false`.
 
 **Não coloque senha no `config.json`.** Credenciais ficam em `secrets.local.json` (arquivo local, fora do Git):
@@ -68,10 +70,10 @@ Edite `config.json`:
 |--------|-----|
 | `clinica_id` | Identificador da clínica no progresso |
 | `sistema_origem` | `mock` (padrão) ou `biodata` |
-| `planilha.*` | Caminho, aba, `linha_cabecalho`, `apenas_ativos` e mapeamento de colunas (lançamentos) |
+| `planilha.*` | Caminho, `linha_cabecalho`, `apenas_ativos`, colunas (lançamentos); `aba` opcional no Padrão (auto); obrigatória no Glaucoma legado |
 | `planilha_prontuarios.*` | Caminho da planilha Cliente/Prontuário (obrigatório com BIODATA); aba/colunas no JSON |
 | `normalizacao` | Hífen→barra na numeração; zeros no código (só se configurado) |
-| `dados_fixos` | Por clínica / stub da UI: `cnes_*`, `tipo_apac`; procedimentos: `codigo_procedimento` e `cns_executante` (**dinâmicos** na UI futura), `cbo` (fixo), `quantidade_procedimento` (sempre `1`) |
+| `dados_fixos` | Por clínica / stub da UI: `cnes_*`, `cbo`, `cns_executante`, médicos/autorizador. **APAC Padrão (SET):** código vem da coluna `COD.` da planilha por paciente; CID (linha 06) e classificação (linha 13) por sufixo em `cid_procedimento_padrao.py` (ex.: sufixo `0283` → CID `H353`, classificação `001`; demais → `codigo_classificacao` do config, ex. `003`). Campos legados `codigo_procedimento` / `cid_principal` no JSON são ignorados no Padrão. Glaucoma: códigos na planilha. |
 | `biodata.modo` | `api` (HTTP, sem Chromium) ou `browser` (Playwright). Se omitido: `api` quando houver `biodata.api.base_url`, senão `browser` |
 | `biodata.api.base_url` | Base REST (ex.: `https://apis.biodataweb.net/oftalmocentro91/biodata`) |
 | `biodata.api.id_sac` | `idSAC` da clínica na API |
@@ -348,6 +350,18 @@ config.example.json
 tests/
 ```
 
-A UI grava os campos dinâmicos, as duas planilhas (`planilha.caminho` e `planilha_prontuarios.caminho`) e `paciente_inicio` no `config.json` (merge seguro: não apaga `biodata`, timeouts etc.) ao clicar em **Iniciar**. Ações na tela: iniciar, cancelar e exportar o `.SET`. Validar/status ficam no CLI. Credenciais continuam em `secrets.local.json`.
+A UI grava os campos dinâmicos, as duas planilhas (`planilha.caminho` e `planilha_prontuarios.caminho`) e `paciente_inicio` no `config.json` (merge seguro: não apaga `biodata`, timeouts etc.) ao clicar em **Iniciar**. Ações na tela: **Iniciar**, **Enviar pacientes pendentes**, cancelar, exportar e visualizar o arquivo parcial (staging `data/export_set/lote_atual.SET`). Validar/status ficam no CLI. Credenciais continuam em `secrets.local.json`.
+
+**Iniciar (`gerar-set`):** continua o lote no mesmo arquivo — pula pacientes já `CONCLUIDO` no `progress.db`, mescla com checkpoint ou `lote_atual.SET` e mantém checkpoint se ainda houver pendências, falhas ou revisão.
+
+**Painel de lote ao abrir ou trocar planilha:** ao entrar na tela principal (após o splash) ou ao escolher outro `.xlsx` no Browse, o progresso da clínica em `progress.db`, o checkpoint `lote_parcial.json` e o staging `data/export_set/lote_atual.SET` são apagados — a tabela volta com todos **Pendente**. Para continuar um lote sem fechar o app, use **Enviar pacientes pendentes** (ou **Iniciar**, que respeita o que já foi concluído na sessão atual).
+
+### Retomar falhas (mesmo arquivo SET)
+
+1. **Iniciar** — gera o lote parcial; falhas aparecem no **Relatório do lote** com o motivo.
+2. Corrija no BIODATA (ou planilha, se for o caso).
+3. **Enviar pacientes pendentes** — na tela principal ou no relatório; equivale a `gerar-set --somente-falhas`.
+4. Só pacientes em **Erro** ou **Em revisão** são consultados de novo; concluídos não são reprocessados.
+5. Os registros novos são **mesclados** no mesmo `data/export_set/lote_atual.SET` até você usar **Exportar arquivo**.
 
 **Export SET/TXT:** a competência do lote é o **mês civil anterior** à data de geração (ex.: em novembro → `AAAAMM` com mês 10). O nome do arquivo segue a competência (`APOFTA10.OUT`, `APGLAU09.SET`, etc.).

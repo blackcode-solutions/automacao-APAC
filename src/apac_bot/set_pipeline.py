@@ -9,6 +9,10 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Optional
 
+from apac_bot.cid_procedimento_padrao import (
+    cid_principal_por_codigo_padrao,
+    classificacao_por_codigo_padrao,
+)
 from apac_bot.config import (
     MODALIDADE_GLAUCOMA,
     AppConfig,
@@ -34,7 +38,8 @@ from apac_bot.pipeline import (
     resolver_paciente,
     validar_dados_obrigatorios_apac,
 )
-from apac_bot.progress import ProgressStore, filtrar_pendentes_lote
+from apac_bot.progress import ProgressStore, filtrar_falhas_lote, filtrar_pendentes_lote
+from apac_bot.set_parse import records_from_set_file
 from apac_bot.set_layout import (
     CabecalhoSet,
     CidGeralSet,
@@ -219,6 +224,88 @@ def _gravar_set_arquivos(
     return staging
 
 
+def lote_concluido(fila: list[Lancamento], store: ProgressStore) -> bool:
+    """True se todo lançamento da fila planilha está CONCLUIDO no progresso."""
+    if not fila:
+        return False
+    for lanc in fila:
+        rec = store.get(lanc.clinica_id, lanc.identidade)
+        if rec is None or rec.estado != EstadoLancamento.CONCLUIDO:
+            return False
+    return True
+
+
+def _mesclar_record(
+    records: list[PacienteSetRecord],
+    novo: PacienteSetRecord,
+) -> list[PacienteSetRecord]:
+    """Substitui por numeração APAC ou acrescenta ao fim."""
+    alvo = numeracao_13(novo.corpo.numeracao)
+    out: list[PacienteSetRecord] = []
+    substituiu = False
+    for rec in records:
+        if numeracao_13(rec.corpo.numeracao) == alvo:
+            out.append(novo)
+            substituiu = True
+        else:
+            out.append(rec)
+    if not substituiu:
+        out.append(novo)
+    return out
+
+
+def _inicializar_records(
+    cfg: AppConfig,
+    competencia_exec: str,
+) -> tuple[str, list[PacienteSetRecord]]:
+    """Checkpoint ou staging SET → lista de records; senão vazio."""
+    checkpoint = carregar_checkpoint(cfg)
+    if checkpoint is not None:
+        comp, records = checkpoint
+        records = list(records)
+        if comp != competencia_exec:
+            log.info(
+                "[gerar-set] competência do checkpoint (%s) → %s",
+                comp,
+                competencia_exec,
+            )
+            records = _records_atualizar_competencia(
+                records, competencia_exec, modalidade=cfg.modalidade
+            )
+        return competencia_exec, records
+    staging = caminho_staging(cfg)
+    if staging.is_file():
+        try:
+            comp, records = records_from_set_file(staging)
+            records = list(records)
+            if comp != competencia_exec:
+                records = _records_atualizar_competencia(
+                    records, competencia_exec, modalidade=cfg.modalidade
+                )
+            log.info(
+                "[gerar-set] base carregada do staging (%s paciente(s))",
+                len(records),
+            )
+            return competencia_exec, records
+        except SetLayoutError as exc:
+            log.warning("[gerar-set] staging ilegível (%s) — base vazia", exc)
+    return competencia_exec, []
+
+
+def _finalizar_checkpoint(
+    cfg: AppConfig,
+    *,
+    competencia: str,
+    records: list[PacienteSetRecord],
+    fila_completa: list[Lancamento],
+    store: ProgressStore,
+) -> None:
+    if lote_concluido(fila_completa, store):
+        limpar_checkpoint(cfg)
+    else:
+        salvar_checkpoint(cfg, competencia=competencia, records=records)
+
+
 def _records_atualizar_competencia(
     records: list[PacienteSetRecord],
     competencia: str,
@@ -309,13 +396,11 @@ def montar_record_paciente(
         else:
             cid, motivo_saida = "H400", "12"
     else:
-        proc_cod = _fixo(cfg, "codigo_procedimento") or _so_digitos(
-            lanc.codigo_apac
-        )
+        proc_cod = _so_digitos(lanc.codigo_apac)
         if not proc_cod:
-            raise SetLayoutError("codigo_procedimento ausente")
+            raise SetLayoutError("codigo_procedimento ausente na planilha (COD.)")
         codigos_proc = [proc_cod]
-        cid = _fixo(cfg, "cid_principal", "H250")
+        cid = cid_principal_por_codigo_padrao(proc_cod)
         motivo_saida = "12"
     proc_cod = codigos_proc[0]
 
@@ -401,7 +486,8 @@ def montar_record_paciente(
         if glaucoma:
             servico, classificacao = servico_classificacao_glaucoma(cod)
         else:
-            servico, classificacao = cod_servico, cod_class
+            servico = cod_servico
+            classificacao = classificacao_por_codigo_padrao(cod, padrao=cod_class)
         procs.append(
             ProcedimentoSet(
                 competencia=competencia,
@@ -449,13 +535,14 @@ def cmd_gerar_set(
     *,
     planilha: Optional[Path] = None,
     limit: Optional[int] = None,
+    somente_falhas: bool = False,
 ) -> int:
     """
     Consulta BIODATA e grava staging .SET (layout INTERNO).
     Retorna 0 se gerou arquivo com >=1 paciente; 1 se nenhum; 2 erro fatal.
 
-    Se existir checkpoint de lote incompleto (aborto anterior), retoma só os
-    pendentes e grava o mesmo SET único com (já feitos + novos).
+    somente_falhas: reprocessa só ERRO + AGUARDANDO_REVISAO e mescla no SET
+    existente (checkpoint ou lote_atual.SET).
     """
     try:
         fila = listar_lancamentos_a_partir(cfg, planilha)
@@ -485,34 +572,38 @@ def cmd_gerar_set(
         return 2
 
     store = _store(cfg)
-    checkpoint = carregar_checkpoint(cfg)
-    retomando = checkpoint is not None
     competencia_exec = competencia_mes_anterior()
-    if retomando:
-        comp_checkpoint, records = checkpoint
-        records = list(records)
-        fila, pulados, _alterados = filtrar_pendentes_lote(fila, store)
-        if comp_checkpoint != competencia_exec:
-            log.warning(
-                "[gerar-set] competência do checkpoint (%s) atualizada para %s",
-                comp_checkpoint,
-                competencia_exec,
+    competencia_lote, records = _inicializar_records(cfg, competencia_exec)
+    fila_completa = list(fila)
+    if somente_falhas:
+        fila, pulados, _alterados = filtrar_falhas_lote(fila, store)
+        if not records:
+            log.error(
+                "[gerar-set] completar erros: sem checkpoint nem lote_atual.SET "
+                "com pacientes — execute Iniciar antes"
             )
-            records = _records_atualizar_competencia(
-                records, competencia_exec, modalidade=cfg.modalidade
+            return 2
+        if not fila:
+            log.error(
+                "[gerar-set] completar erros: nenhum lançamento em ERRO ou "
+                "AGUARDANDO_REVISAO"
             )
-        competencia_lote = competencia_exec
+            return 1
         log.info(
-            "[gerar-set] retomando lote incompleto: checkpoint=%s "
-            "pendente(s)=%s pulado(s)=%s competencia=%s",
-            len(records),
+            "[gerar-set] modo completar erros: falhas=%s pulados=%s base_set=%s",
             len(fila),
             len(pulados),
-            competencia_lote,
+            len(records),
         )
     else:
-        records = []
-        competencia_lote = competencia_exec
+        fila, pulados, _alterados = filtrar_pendentes_lote(fila, store)
+        if pulados:
+            log.info(
+                "[gerar-set] pulado(s)=%s pendente(s)=%s base_set=%s",
+                len(pulados),
+                len(fila),
+                len(records),
+            )
 
     ok = 0
     revisao = 0
@@ -556,7 +647,7 @@ def cmd_gerar_set(
                 rec = montar_record_paciente(
                     cfg, lanc, competencia=competencia_lote
                 )
-                records.append(rec)
+                records = _mesclar_record(records, rec)
                 store.upsert(
                     lanc,
                     EstadoLancamento.CONCLUIDO,
@@ -615,7 +706,13 @@ def cmd_gerar_set(
         _persistir_parcial_apos_erro(cfg, records, competencia_lote)
         return 2
 
-    limpar_checkpoint(cfg)
+    _finalizar_checkpoint(
+        cfg,
+        competencia=competencia_lote,
+        records=records,
+        fila_completa=fila_completa,
+        store=store,
+    )
     log.info(
         "[gerar-set] finalizado ok=%s revisao=%s erros=%s total_set=%s",
         ok,

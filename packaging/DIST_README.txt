@@ -40,3 +40,8 @@ Executar
 Menu Iniciar / atalho / SIS-DG-APAC.exe (abre a UI).
 O ícone do executável e do Setup é a marca DG
 (packaging/sis-dg-apac.ico no build).
+
+Na UI:
+  Iniciar — continua o lote no mesmo arquivo SET (pula concluídos).
+  Completar erros — só pacientes em Erro ou Em revisão, após ajuste no BIODATA.
+  Exportar arquivo — copia o lote_atual.SET gerado no servidor/pasta local.

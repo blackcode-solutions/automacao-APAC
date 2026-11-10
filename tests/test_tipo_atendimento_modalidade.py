@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from apac_bot.config import MODALIDADE_GLAUCOMA, MODALIDADE_PADRAO, AppConfig
 from apac_bot.models import Lancamento, PacienteDados
 from apac_bot.set_pipeline import (
@@ -167,14 +169,23 @@ def test_glaucoma_um_procedimento_motivo_12_cid_h400():
     assert rec.cid.cid_principal == "H400"
 
 
-def test_padrao_continua_usando_codigo_fixo():
+def test_padrao_usa_codigo_planilha_e_cid_por_sufixo():
     cfg = _cfg(MODALIDADE_PADRAO)
     lanc = _lanc()
-    lanc.codigo_apac = "9999999999"
+    lanc.codigo_apac = "9999990321"
     rec = montar_record_paciente(cfg, lanc, competencia="202609")
-    assert rec.corpo.codigo_procedimento == "0405050372"
-    assert len(rec.procedimentos) == 1
-    assert rec.procedimentos[0].codigo_procedimento == "0405050372"
+    assert rec.corpo.codigo_procedimento == "9999990321"
+    assert rec.cid.cid_principal == "H401"
+    assert rec.procedimentos[0].codigo_procedimento == "9999990321"
+
+
+def test_padrao_sufixo_sem_cid_falha():
+    cfg = _cfg(MODALIDADE_PADRAO)
+    lanc = _lanc()
+    lanc.codigo_apac = "0405050999"
+    with pytest.raises(Exception) as exc:
+        montar_record_paciente(cfg, lanc, competencia="202609")
+    assert "0999" in str(exc.value)
 
 
 def test_servico_classificacao_glaucoma_tabela():
@@ -206,7 +217,17 @@ def test_glaucoma_servico_classificacao_por_procedimento():
 def test_padrao_servico_classificacao_fixos_config():
     cfg = _cfg(MODALIDADE_PADRAO)
     lanc = _lanc()
-    lanc.codigo_apac = "0303050187"
+    lanc.codigo_apac = "0405050372"
     rec = montar_record_paciente(cfg, lanc, competencia="202609")
     assert rec.procedimentos[0].codigo_servico == "131"
     assert rec.procedimentos[0].codigo_classificacao == "003"
+
+
+def test_padrao_classificacao_0283_sufixo():
+    cfg = _cfg(MODALIDADE_PADRAO)
+    lanc = _lanc()
+    lanc.codigo_apac = "0405050283"
+    rec = montar_record_paciente(cfg, lanc, competencia="202609")
+    assert rec.cid.cid_principal == "H353"
+    assert rec.procedimentos[0].codigo_servico == "131"
+    assert rec.procedimentos[0].codigo_classificacao == "001"

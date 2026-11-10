@@ -250,6 +250,7 @@ class RelatorioLoteWindow(ctk.CTkToplevel):
         *,
         title: str = "Relatório do lote",
         on_export_cliente: Callable[[], None] | None = None,
+        on_enviar_pendentes: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master)
         self.title(title)
@@ -260,7 +261,9 @@ class RelatorioLoteWindow(ctk.CTkToplevel):
         self.grid_rowconfigure(1, weight=1)
 
         self._on_export_cliente = on_export_cliente
+        self._on_enviar_pendentes = on_enviar_pendentes
         self._btn_export_cliente: ctk.CTkButton | None = None
+        self._btn_enviar_pendentes: ctk.CTkButton | None = None
         self._rows: tuple[LoteRow, ...] = ()
         self._filtered_rows: tuple[LoteRow, ...] = ()
         self._closed = False
@@ -345,6 +348,16 @@ class RelatorioLoteWindow(ctk.CTkToplevel):
         actions.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
         actions.grid_columnconfigure(0, weight=1)
         col = 1
+        if self._on_enviar_pendentes is not None:
+            self._btn_enviar_pendentes = theme.btn_primary(
+                actions,
+                "Enviar pacientes pendentes",
+                command=self._on_enviar_pendentes,
+                width=200,
+            )
+            self._btn_enviar_pendentes.grid(row=0, column=col, padx=(0, 8))
+            self._btn_enviar_pendentes.configure(state="disabled")
+            col += 1
         if self._on_export_cliente is not None:
             self._btn_export_cliente = theme.btn_secondary(
                 actions,
@@ -366,18 +379,37 @@ class RelatorioLoteWindow(ctk.CTkToplevel):
         self.transient(master)
         self.after(50, self.present)
 
-    def set_export_cliente_busy(self, busy: bool) -> None:
-        """Desabilita o botão durante montagem/gravação do relatório cliente."""
-        btn = self._btn_export_cliente
+    def set_enviar_pendentes_enabled(self, enabled: bool) -> None:
+        """Habilita reenvio só quando há falhas e staging (App sincroniza)."""
+        btn = self._btn_enviar_pendentes
         if btn is None:
             return
         try:
             if not self.winfo_exists():
                 return
-            btn.configure(state="disabled" if busy else "normal")
+            btn.configure(state="normal" if enabled else "disabled")
         except Exception:
-            # Janela fechada durante export em background
             return
+
+    def set_acoes_busy(self, busy: bool) -> None:
+        """Desabilita ações do rodapé durante gerar-set ou export cliente."""
+        state = "disabled" if busy else "normal"
+        for btn in (self._btn_enviar_pendentes, self._btn_export_cliente):
+            if btn is None:
+                continue
+            try:
+                if not self.winfo_exists():
+                    return
+                if btn is self._btn_enviar_pendentes and not busy:
+                    # enabled recalculado pela App via set_enviar_pendentes_enabled
+                    continue
+                btn.configure(state=state)
+            except Exception:
+                return
+
+    def set_export_cliente_busy(self, busy: bool) -> None:
+        """Desabilita o botão durante montagem/gravação do relatório cliente."""
+        self.set_acoes_busy(busy)
 
     def present(self) -> None:
         if self._closed:

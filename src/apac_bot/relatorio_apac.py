@@ -437,10 +437,9 @@ def _row_erro_lanc(
         else:
             comp_fmt = ""
             ref = date.today()
-    codigo = (
-        (lanc.codigo_apac or lanc.codigo_original or "").strip()
-        or _fixo(cfg, "codigo_procedimento")
-    )
+    codigo = (lanc.codigo_apac or lanc.codigo_original or "").strip()
+    if not codigo and cfg.modalidade != MODALIDADE_PADRAO:
+        codigo = _fixo(cfg, "codigo_procedimento")
     cbo = _fixo(cfg, "cbo", "225265")
     qtd = _fixo(cfg, "quantidade_procedimento", "1") or "1"
     nome = (lanc.paciente_nome or "").strip()

@@ -23,6 +23,19 @@ def test_cep_para_apac_default_quando_ausente():
     assert cep_para_apac("123") == "65010000"
 
 
+def test_cep_para_apac_substitui_por_65763000():
+    ceps = (
+        "65040084",
+        "65042357",
+        "65095886",
+        "65052120",
+        "66666666",
+    )
+    for cep in ceps:
+        assert cep_para_apac(cep) == "65763000"
+    assert cep_para_apac("65040-084") == "65763000"
+
+
 def test_cep_para_apac_substitui_ceps_invalidos():
     for cep in (
         "65000000",
@@ -99,6 +112,13 @@ def test_montar_com_cep_preserva():
         _cfg(), _lanc(cep="65085-060"), competencia="202609"
     )
     assert rec.corpo.cep == "65085060"
+
+
+def test_montar_record_usa_65763000():
+    rec = montar_record_paciente(
+        _cfg(), _lanc(cep="66666666"), competencia="202609"
+    )
+    assert rec.corpo.cep == "65763000"
 
 
 def test_montar_substitui_ceps_invalidos():

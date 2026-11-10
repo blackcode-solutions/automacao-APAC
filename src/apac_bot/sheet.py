@@ -527,6 +527,138 @@ def _linha_oculta(ws, row: int) -> bool:
         return False
 
 
+_MESES_PT_EXTO: tuple[str, ...] = (
+    "janeiro",
+    "fevereiro",
+    "marco",
+    "abril",
+    "maio",
+    "junho",
+    "julho",
+    "agosto",
+    "setembro",
+    "outubro",
+    "novembro",
+    "dezembro",
+)
+
+_RE_ANO_ARQUIVO = re.compile(r"\b(20\d{2})\b")
+
+
+def _chave_nome(texto: str) -> str:
+    return _sem_acento(texto or "").casefold()
+
+
+def _eh_aba_producao_apac(nome_aba: str) -> bool:
+    chave = _chave_nome(nome_aba)
+    return "producao" in chave and "apac" in chave
+
+
+def extrair_mes_ano_do_arquivo(caminho: Path) -> tuple[Optional[str], Optional[str]]:
+    """Extrai mês por extenso (normalizado) e ano do nome do arquivo .xlsx."""
+    stem = _chave_nome(caminho.stem)
+    ano_match = _RE_ANO_ARQUIVO.search(stem)
+    ano = ano_match.group(1) if ano_match else None
+    mes: Optional[str] = None
+    for candidato in _MESES_PT_EXTO:
+        if re.search(rf"\b{re.escape(candidato)}\b", stem):
+            mes = candidato
+            break
+    return mes, ano
+
+
+def _candidatas_abas_lancamento(sheetnames: list[str]) -> list[str]:
+    producao_abas = [nome for nome in sheetnames if _eh_aba_producao_apac(nome)]
+    return producao_abas if producao_abas else list(sheetnames)
+
+
+def _filtrar_abas_por_mes_ano(
+    candidatas: list[str], mes: str, ano: str
+) -> list[str]:
+    out: list[str] = []
+    for nome in candidatas:
+        chave = _chave_nome(nome)
+        if mes in chave and ano in chave:
+            out.append(nome)
+    return out
+
+
+def _aba_tem_cabecalho_lancamentos(ws, cfg: AppConfig) -> bool:
+    headers = _header_map(ws, cfg.planilha_linha_cabecalho)
+    colmap = cfg.colunas
+    for key in ("PACIENTE", "COD", "AUDITOR", "NUMERACAO"):
+        header_name = colmap.get(key)
+        if not header_name or header_name not in headers:
+            return False
+    return True
+
+
+def _abas_validas_por_cabecalho(wb, candidatas: list[str], cfg: AppConfig) -> list[str]:
+    return [
+        nome
+        for nome in candidatas
+        if _aba_tem_cabecalho_lancamentos(wb[nome], cfg)
+    ]
+
+
+def _match_aba_hint(hint: str, candidatas: list[str]) -> Optional[str]:
+    escolhida = (hint or "").strip()
+    if not escolhida:
+        return None
+    alvo = _chave_nome(escolhida)
+    for nome in candidatas:
+        if _chave_nome(nome) == alvo:
+            return nome
+    return None
+
+
+def resolver_aba_lancamentos_padrao(caminho: Path, wb, cfg: AppConfig) -> str:
+    """
+    Escolhe a aba de lançamentos no APAC Padrão (nome do arquivo, padrão PRODUÇÃO APAC,
+    cabeçalho obrigatório; planilha.aba só como dica em ambiguidade).
+    """
+    sheetnames = list(wb.sheetnames)
+    candidatas = _candidatas_abas_lancamento(sheetnames)
+    filtradas = list(candidatas)
+
+    mes, ano = extrair_mes_ano_do_arquivo(caminho)
+    if mes and ano:
+        por_token = _filtrar_abas_por_mes_ano(candidatas, mes, ano)
+        if por_token:
+            filtradas = por_token
+
+    validas = _abas_validas_por_cabecalho(wb, filtradas, cfg)
+    if not validas:
+        validas = _abas_validas_por_cabecalho(wb, candidatas, cfg)
+
+    if len(validas) == 1:
+        return validas[0]
+
+    if len(validas) > 1:
+        hint = str((cfg.raw.get("planilha") or {}).get("aba") or "").strip()
+        hit = _match_aba_hint(hint, validas)
+        if hit:
+            return hit
+        raise SheetError(
+            "Várias abas de lançamentos válidas: "
+            f"{', '.join(validas)}. "
+            "Use um nome de arquivo com mês/ano ou defina planilha.aba como dica."
+        )
+
+    if len(filtradas) == 1:
+        return filtradas[0]
+
+    hint = str((cfg.raw.get("planilha") or {}).get("aba") or "").strip()
+    hit = _match_aba_hint(hint, candidatas)
+    if hit:
+        return hit
+
+    raise SheetError(
+        f"Nenhuma aba de lançamentos válida em {caminho.name}. "
+        f"Disponíveis: {sheetnames}"
+    )
+
+
 ABA_GLAUCOMA_BASE_CONSULTAS = "Base Consultas"
 ABA_GLAUCOMA_TRAT_PREFIX = "trat "
 
@@ -806,16 +938,19 @@ def load_lancamentos(
     apenas_ativos = cfg.planilha_apenas_ativos
     # read_only=True não expõe bem row_dimensions.hidden; use modo normal com apenas_ativos
     wb = load_workbook(caminho, data_only=True, read_only=not apenas_ativos)
-    aba = cfg.planilha_aba
-    if aba not in wb.sheetnames:
-        raise SheetError(f"Aba '{aba}' não encontrada. Disponíveis: {wb.sheetnames}")
+    erros: list[str] = []
+    avisos: list[str] = []
+    try:
+        aba = resolver_aba_lancamentos_padrao(caminho, wb, cfg)
+    except SheetError:
+        wb.close()
+        raise
+    avisos.append(f"Aba de lançamentos: '{aba}' (automática).")
     ws = wb[aba]
 
     colmap = cfg.colunas
     header_row = cfg.planilha_linha_cabecalho
     headers = _header_map(ws, header_row)
-    erros: list[str] = []
-    avisos: list[str] = []
 
     required_headers = {
         "PACIENTE": colmap["PACIENTE"],

@@ -12,11 +12,13 @@ from apac_bot.config import AppConfig
 from apac_bot.connectors.biodata_api import BiodataApiError
 from apac_bot.models import Lancamento, PacienteDados
 from apac_bot.set_pipeline import (
+    _mesclar_record,
     caminho_checkpoint,
     caminho_staging,
     carregar_checkpoint,
     cmd_gerar_set,
     limpar_checkpoint,
+    montar_record_paciente,
     record_from_dict,
     record_to_dict,
     salvar_checkpoint,
@@ -223,7 +225,7 @@ def test_retoma_completa_mesmo_set_unico(tmp_path: Path):
     assert connector2.buscar_por_prontuario.call_count == 2
 
 
-def test_sem_checkpoint_nao_filtra_por_progresso(tmp_path: Path):
+def test_iniciar_sempre_filtra_pendentes(tmp_path: Path):
     cfg = _cfg(tmp_path)
     fila = [_lanc(i) for i in range(3)]
     connector = _connector_ok()
@@ -233,13 +235,85 @@ def test_sem_checkpoint_nao_filtra_por_progresso(tmp_path: Path):
     ), patch(
         "apac_bot.set_pipeline.build_connector", return_value=connector
     ), patch(
-        "apac_bot.set_pipeline.filtrar_pendentes_lote"
+        "apac_bot.set_pipeline.filtrar_pendentes_lote",
+        wraps=__import__(
+            "apac_bot.progress", fromlist=["filtrar_pendentes_lote"]
+        ).filtrar_pendentes_lote,
     ) as filtrar:
         code = cmd_gerar_set(cfg)
 
     assert code == 0
-    filtrar.assert_not_called()
+    filtrar.assert_called_once()
     assert connector.buscar_por_prontuario.call_count == 3
+
+
+def test_mesclar_record_substituicao_numeracao(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    lanc_a = _lanc(0)
+    lanc_b = _lanc(1)
+    lanc_a.paciente = _pac_ok(lanc_a.prontuario or "1000")
+    lanc_b.paciente = _pac_ok(lanc_b.prontuario or "1001")
+    rec_a = montar_record_paciente(cfg, lanc_a, competencia="202609")
+    rec_b = montar_record_paciente(cfg, lanc_b, competencia="202609")
+    merged = _mesclar_record([rec_a], rec_b)
+    assert len(merged) == 2
+
+    lanc_a.paciente = PacienteDados(
+        nome="OUTRO NOME",
+        nome_mae="MAE",
+        cpf="03345250390",
+        nascimento="27/10/1981",
+        sexo="M",
+        logradouro="RUA",
+        numero="1",
+        cep="65763000",
+        bairro="CENTRO",
+    )
+    rec_a2 = montar_record_paciente(cfg, lanc_a, competencia="202609")
+    merged2 = _mesclar_record(merged, rec_a2)
+    assert len(merged2) == 2
+    assert merged2[0].corpo.nome == "OUTRO NOME"
+
+
+def test_lote_incompleto_checkpoint_e_somente_falhas(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    fila = [_lanc(i) for i in range(3)]
+
+    def resolver(_connector, lanc):
+        if lanc.prontuario == "1001":
+            return None, "nome_mae inválido (teste)"
+        return _pac_ok(lanc.prontuario or "1000"), None
+
+    connector = _connector_ok()
+    with patch(
+        "apac_bot.set_pipeline.listar_lancamentos_a_partir", return_value=fila
+    ), patch(
+        "apac_bot.set_pipeline.build_connector", return_value=connector
+    ), patch(
+        "apac_bot.set_pipeline.resolver_paciente", side_effect=resolver
+    ):
+        code = cmd_gerar_set(cfg)
+
+    assert code == 0
+    assert caminho_checkpoint(cfg).is_file()
+    staging = caminho_staging(cfg)
+    text = staging.read_bytes().decode("latin-1")
+    assert text.count("\r\n14") == 2
+
+    with patch(
+        "apac_bot.set_pipeline.listar_lancamentos_a_partir", return_value=fila
+    ), patch(
+        "apac_bot.set_pipeline.build_connector", return_value=_connector_ok()
+    ), patch(
+        "apac_bot.set_pipeline.resolver_paciente",
+        side_effect=lambda _c, l: (_pac_ok(l.prontuario or "1000"), None),
+    ):
+        code2 = cmd_gerar_set(cfg, somente_falhas=True)
+
+    assert code2 == 0
+    assert not caminho_checkpoint(cfg).is_file()
+    text2 = staging.read_bytes().decode("latin-1")
+    assert text2.count("\r\n14") == 3
 
 
 def test_staging_atualizado_apos_primeiro_paciente(tmp_path: Path):

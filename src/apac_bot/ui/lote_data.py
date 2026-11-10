@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,10 @@ from typing import Optional
 from apac_bot.config import AppConfig, config_dir, load_config, resolve_path
 from apac_bot.models import EstadoLancamento, Lancamento
 from apac_bot.progress import ProgressRecord, ProgressStore
+from apac_bot.set_pipeline import caminho_staging, limpar_checkpoint
 from apac_bot.sheet import SheetError, listar_lancamentos_a_partir
+
+log = logging.getLogger(__name__)
 
 STATUS_LABELS: dict[EstadoLancamento, str] = {
     EstadoLancamento.CONCLUIDO: "Concluído",
@@ -91,6 +95,21 @@ def contar_por_estado(
 
 def linhas_com_problema(rows: Sequence[LoteRow]) -> tuple[LoteRow, ...]:
     return tuple(r for r in rows if r.estado in ESTADOS_PROBLEMA)
+
+
+_FALHAS_COMPLETAR = frozenset(
+    {EstadoLancamento.ERRO, EstadoLancamento.AGUARDANDO_REVISAO}
+)
+
+
+def tem_falhas_completar(rows: Sequence[LoteRow]) -> bool:
+    """Há pacientes em ERRO ou Em revisão (ação «Enviar pacientes pendentes»)."""
+    return any(r.estado in _FALHAS_COMPLETAR for r in rows)
+
+
+def contagem_falhas_completar(rows: Sequence[LoteRow]) -> int:
+    """Quantidade em ERRO ou Em revisão (modo --somente-falhas)."""
+    return sum(1 for r in rows if r.estado in _FALHAS_COMPLETAR)
 
 
 def filtrar_linhas_lote(
@@ -173,6 +192,25 @@ def _limite_fila(cfg: AppConfig) -> int:
 def _store(cfg: AppConfig) -> ProgressStore:
     base = config_dir(cfg)
     return ProgressStore(resolve_path(base, cfg.progresso_db))
+
+
+def reset_lote_operacional(cfg: AppConfig) -> int:
+    """
+    Zera progresso da clínica, checkpoint SET parcial e staging interno
+    (lote_atual.SET). Não remove arquivos exportados pelo usuário.
+    """
+    store = _store(cfg)
+    removed = store.clear_clinica(cfg.clinica_id)
+    limpar_checkpoint(cfg)
+    staging = caminho_staging(cfg)
+    if staging.is_file():
+        try:
+            staging.unlink()
+        except OSError as exc:
+            log.warning("[lote-reset] falha ao remover staging %s: %s", staging, exc)
+    if removed > 0:
+        log.info("[lote-reset] lote operacional reiniciado (%s registros)", removed)
+    return removed
 
 
 def _prontuario(lanc: Lancamento) -> str:

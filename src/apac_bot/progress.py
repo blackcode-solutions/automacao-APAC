@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,6 +10,8 @@ from typing import Optional
 from apac_bot.models import EstadoLancamento, Lancamento
 
 MOTIVO_ENTRADA_ALTERADA = "entrada alterada desde a última execução"
+
+log = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
@@ -117,6 +120,23 @@ class ProgressStore:
             )
             conn.commit()
 
+    def clear_clinica(self, clinica_id: str) -> int:
+        """Remove todos os lançamentos da clínica; retorna quantidade removida."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM lancamentos WHERE clinica_id = ?",
+                (clinica_id,),
+            )
+            conn.commit()
+            removed = int(cur.rowcount)
+        if removed > 0:
+            log.info(
+                "[progress-store] removidos %s registros (clinica_id=%s)",
+                removed,
+                clinica_id,
+            )
+        return removed
+
     def list_by_clinica(self, clinica_id: str) -> list[ProgressRecord]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -180,3 +200,33 @@ def filtrar_pendentes_lote(
             alterados.append(lanc)
         pendentes.append(lanc)
     return pendentes, pulados, alterados
+
+
+_ESTADOS_FALHA = frozenset(
+    {EstadoLancamento.ERRO, EstadoLancamento.AGUARDANDO_REVISAO}
+)
+
+
+def filtrar_falhas_lote(
+    lancamentos: list[Lancamento],
+    store: ProgressStore,
+) -> tuple[list[Lancamento], list[tuple[Lancamento, str]], list[Lancamento]]:
+    """
+    Só lançamentos em ERRO ou AGUARDANDO_REVISAO (modo «Completar erros»).
+    Demais vão para pulados com motivo.
+    """
+    processar: list[Lancamento] = []
+    pulados: list[tuple[Lancamento, str]] = []
+    alterados: list[Lancamento] = []
+    for lanc in lancamentos:
+        rec = store.get(lanc.clinica_id, lanc.identidade)
+        if rec is None:
+            pulados.append((lanc, "sem registro de falha no progresso"))
+            continue
+        if rec.estado not in _ESTADOS_FALHA:
+            pulados.append((lanc, f"estado {rec.estado.value} — ignorado em completar erros"))
+            continue
+        if rec.hash_entrada != lanc.hash_entrada():
+            alterados.append(lanc)
+        processar.append(lanc)
+    return processar, pulados, alterados

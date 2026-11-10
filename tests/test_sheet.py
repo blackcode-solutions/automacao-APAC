@@ -2,16 +2,18 @@ import json
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from apac_bot.config import MODALIDADE_GLAUCOMA, MODALIDADE_PADRAO, AppConfig
 from apac_bot.sheet import (
     SheetError,
     create_example_workbook,
     extrair_codigos_associados,
+    extrair_mes_ano_do_arquivo,
     listar_abas_faturamento_glaucoma,
     listar_lancamentos_a_partir,
     load_lancamentos,
+    resolver_aba_lancamentos_padrao,
 )
 
 
@@ -420,3 +422,123 @@ def test_padrao_nao_usa_leitor_glaucoma(cfg_tmp: AppConfig):
     assert result.ok
     assert result.lancamentos[0].codigo_original == "0412345678"
     assert result.lancamentos[0].prontuario is None or result.lancamentos[0].prontuario == ""
+    assert any("automática" in a for a in result.avisos)
+
+
+_LANC_HEADERS = [
+    "PACIENTE",
+    "COD.",
+    "AUDITOR",
+    "NUMERAÇÃO",
+    "QUANT.",
+    "ID_PACIENTE",
+]
+
+
+def _preencher_aba_lancamentos(ws, paciente: str) -> None:
+    ws.append(_LANC_HEADERS)
+    ws.append([paciente, "0412345678", "AUD01", "1234567890123-4", "1", "BIO-1"])
+    for col in (2, 4, 6):
+        cell = ws.cell(2, col)
+        cell.number_format = "@"
+        cell.value = str(cell.value)
+
+
+def _cfg_planilha_padrao(tmp_path: Path, xlsx: Path, **planilha_kw) -> AppConfig:
+    example = json.loads(Path("config.example.json").read_text(encoding="utf-8"))
+    example["planilha"]["caminho"] = str(xlsx)
+    example.setdefault("apac", {})["modalidade"] = MODALIDADE_PADRAO
+    for key, val in planilha_kw.items():
+        example["planilha"][key] = val
+    return AppConfig(raw=example, path=tmp_path / "c.json")
+
+
+def test_extrair_mes_ano_do_arquivo(tmp_path: Path):
+    mes, ano = extrair_mes_ano_do_arquivo(tmp_path / "APAC OUTUBRO 2026.xlsx")
+    assert mes == "outubro"
+    assert ano == "2026"
+
+
+def test_resolver_aba_pelo_nome_arquivo_outubro(tmp_path: Path):
+    path = tmp_path / "APAC OUTUBRO 2026.xlsx"
+    wb = Workbook()
+    ws_geral = wb.active
+    ws_geral.title = "PRODUÇÃO APAC 2026"
+    _preencher_aba_lancamentos(ws_geral, "PACIENTE GERAL")
+    ws_out = wb.create_sheet("PRODUÇÃO APAC OUTUBRO 2026")
+    _preencher_aba_lancamentos(ws_out, "PACIENTE OUTUBRO")
+    wb.save(path)
+
+    cfg = _cfg_planilha_padrao(
+        tmp_path,
+        path,
+        aba="PRODUÇÃO APAC SETEMBRO 2026",
+    )
+    result = load_lancamentos(cfg)
+    assert result.ok, result.erros
+    assert len(result.lancamentos) == 1
+    assert result.lancamentos[0].paciente_nome == "PACIENTE OUTUBRO"
+
+
+def test_resolver_aba_unica_producao(tmp_path: Path):
+    path = tmp_path / "dados.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "PRODUÇÃO APAC 2026"
+    _preencher_aba_lancamentos(ws, "UNICO")
+    wb.save(path)
+
+    cfg = _cfg_planilha_padrao(tmp_path, path, aba="")
+    result = load_lancamentos(cfg)
+    assert result.ok
+    assert result.lancamentos[0].paciente_nome == "UNICO"
+
+
+def test_resolver_aba_ambigua_erro(tmp_path: Path):
+    path = tmp_path / "planilha_apac.xlsx"
+    wb = Workbook()
+    ws_set = wb.active
+    ws_set.title = "PRODUÇÃO APAC SETEMBRO 2026"
+    _preencher_aba_lancamentos(ws_set, "SET")
+    ws_out = wb.create_sheet("PRODUÇÃO APAC OUTUBRO 2026")
+    _preencher_aba_lancamentos(ws_out, "OUT")
+    wb.save(path)
+
+    cfg = _cfg_planilha_padrao(tmp_path, path, aba="")
+    with pytest.raises(SheetError, match="Várias abas"):
+        load_lancamentos(cfg)
+
+
+def test_resolver_aba_ambigua_desempata_hint(tmp_path: Path):
+    path = tmp_path / "planilha_apac.xlsx"
+    wb = Workbook()
+    ws_set = wb.active
+    ws_set.title = "PRODUÇÃO APAC SETEMBRO 2026"
+    _preencher_aba_lancamentos(ws_set, "SET")
+    ws_out = wb.create_sheet("PRODUÇÃO APAC OUTUBRO 2026")
+    _preencher_aba_lancamentos(ws_out, "OUT")
+    wb.save(path)
+
+    cfg = _cfg_planilha_padrao(
+        tmp_path,
+        path,
+        aba="PRODUÇÃO APAC OUTUBRO 2026",
+    )
+    result = load_lancamentos(cfg)
+    assert result.ok
+    assert result.lancamentos[0].paciente_nome == "OUT"
+
+
+def test_resolver_aba_lancamentos_unitario(tmp_path: Path):
+    path = tmp_path / "APAC OUTUBRO 2026.xlsx"
+    wb = Workbook()
+    wb.active.title = "PRODUÇÃO APAC OUTUBRO 2026"
+    _preencher_aba_lancamentos(wb.active, "X")
+    wb.save(path)
+    wb2 = load_workbook(path, data_only=True)
+    cfg = _cfg_planilha_padrao(tmp_path, path)
+    assert (
+        resolver_aba_lancamentos_padrao(path, wb2, cfg)
+        == "PRODUÇÃO APAC OUTUBRO 2026"
+    )
+    wb2.close()
