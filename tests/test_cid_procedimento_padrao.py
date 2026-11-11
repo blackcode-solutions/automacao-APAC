@@ -22,6 +22,8 @@ from apac_bot.cid_procedimento_padrao import (
         ("405050224", "H112"),
         ("0405050151", "A300"),
         ("0405050372", "H250"),
+        ("0405050373", "H250"),
+        ("0405050070", "H334"),
         ("0405050321", "H401"),
         ("0405050100", "A300"),
         ("0405050011", "H264"),
@@ -38,7 +40,7 @@ def test_cid_por_sufixo_tabela(codigo: str, cid: str) -> None:
 
 
 def test_todos_sufixos_mapeados_tem_entrada() -> None:
-    assert len(CID_POR_SUFIXO_PADRAO) == 12
+    assert len(CID_POR_SUFIXO_PADRAO) == 14
 
 
 def test_sufixo_desconhecido() -> None:

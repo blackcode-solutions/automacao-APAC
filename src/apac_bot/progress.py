@@ -173,7 +173,7 @@ class ProgressStore:
         if rec.estado == EstadoLancamento.CONCLUIDO:
             return True, "já concluído"
         if rec.estado == EstadoLancamento.SALVAMENTO_INCERTO or rec.precisa_reconciliar:
-            return True, "salvamento incerto — reconcilie no APAC antes de retomar"
+            return True, "estado incerto — revise manualmente antes de retomar"
         if rec.hash_entrada != lanc.hash_entrada():
             return False, MOTIVO_ENTRADA_ALTERADA
         # AGUARDANDO_REVISAO: nao pula — retoma apos corrigir BIODATA/planilha

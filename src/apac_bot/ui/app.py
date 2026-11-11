@@ -19,13 +19,16 @@ from apac_bot.license import LicenseError, ensure_license, license_enabled
 from apac_bot.sheet import SheetError, listar_abas_faturamento_glaucoma
 from apac_bot.ui import theme
 from apac_bot.ui.config_io import (
+    CLINICA_PADRAO_POR_SISTEMA,
     CLINICAS_POR_SISTEMA,
+    CLINICAS_UI,
     CNES_UI_KEYS,
     DADOS_FIXOS_LABELS,
     DADOS_FIXOS_UI_KEYS,
     MODALIDADE_GLAUCOMA,
     MODALIDADE_PADRAO,
     MODALIDADES_UI,
+    SISTEMA_POR_CLINICA,
     SISTEMAS_UI,
     ConfigIoError,
     UiFormData,
@@ -63,7 +66,7 @@ from apac_bot.ui.lote_panel import (
 APP_NAME = "SIS DG"
 ABA_GLAUCOMA_TODAS = "Todas as abas"
 APP_TAGLINE = "Sistema de Inteligência em Saúde DG"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 BRAND_FG = "#1a2a38"
 BRAND_ACCENT = "#103055"
 SPLASH_BG = "#ffffff"
@@ -155,6 +158,8 @@ class ApacBotApp(ctk.CTk):
         self._last_bg_size: tuple[int, int] = (0, 0)
         self._main_ready = False
         self._planilha_path_ultimo_reset: str = ""
+        self._planilha_pacientes_cache: str = ""
+        self._syncing_sistema_clinica = False
         self._modalidade = MODALIDADE_PADRAO
         self._dados_fixos_cache: dict[str, str] = {}
         self._secoes_host: Optional[ctk.CTkFrame] = None
@@ -653,12 +658,12 @@ class ApacBotApp(ctk.CTk):
         inner_actions.grid_columnconfigure(2, weight=1)
         inner_actions.grid_columnconfigure(3, weight=1)
 
-        self.btn_open_apac = theme.btn_primary(
+        self.btn_iniciar = theme.btn_primary(
             inner_actions,
             "Iniciar",
             command=lambda: self._run_cli("gerar-set"),
         )
-        self.btn_open_apac.grid(row=0, column=0, padx=(0, 6), pady=0, sticky="ew")
+        self.btn_iniciar.grid(row=0, column=0, padx=(0, 6), pady=0, sticky="ew")
         self.btn_cancel = theme.btn_danger(
             inner_actions,
             "Cancelar",
@@ -771,7 +776,7 @@ class ApacBotApp(ctk.CTk):
     def _sync_action_buttons_for_modalidade(self) -> None:
         if self._job_running:
             return
-        btn_iniciar = getattr(self, "btn_open_apac", None)
+        btn_iniciar = getattr(self, "btn_iniciar", None)
         btn_export = getattr(self, "btn_export_set", None)
         btn_preview = getattr(self, "btn_preview_set", None)
         btn_completar = getattr(self, "btn_completar_erros", None)
@@ -923,7 +928,8 @@ class ApacBotApp(ctk.CTk):
         wrap.grid(row=row, column=0, sticky="ew", padx=0, pady=4)
         wrap.grid_columnconfigure(0, weight=0)
         wrap.grid_columnconfigure(1, weight=0)
-        wrap.grid_columnconfigure(2, weight=1)
+        wrap.grid_columnconfigure(2, weight=0)
+        wrap.grid_columnconfigure(3, weight=1)
 
         col_sistema = ctk.CTkFrame(wrap, fg_color="transparent")
         col_sistema.grid(row=0, column=0, sticky="nw", padx=(0, 10), pady=0)
@@ -946,14 +952,31 @@ class ApacBotApp(ctk.CTk):
         )
         self.opt_clinica = theme.style_option(
             col_clinica,
-            values=["oftalmocentro91"],
+            values=list(CLINICAS_UI),
             width=160,
             command=self._on_clinica_changed,
         )
         self.opt_clinica.grid(row=1, column=0, sticky="w", padx=0, pady=0)
 
+        self._col_planilha_pacientes = ctk.CTkFrame(wrap, fg_color="transparent")
+        self._col_planilha_pacientes.grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=0)
+        self._col_planilha_pacientes.grid_columnconfigure(0, weight=1)
+        theme.style_field_label(
+            self._col_planilha_pacientes, "Planilha pacientes (.xlsx)"
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2))
+        entry_pac = theme.style_entry(self._col_planilha_pacientes, width=220)
+        entry_pac.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=0)
+        self._entries["planilha_pacientes_caminho"] = entry_pac
+        theme.btn_secondary(
+            self._col_planilha_pacientes,
+            "Browse…",
+            width=90,
+            command=self._browse_planilha_pacientes,
+        ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
+        self._col_planilha_pacientes.grid_remove()
+
         self._planilha_anexos_host = ctk.CTkFrame(wrap, fg_color="transparent")
-        self._planilha_anexos_host.grid(row=0, column=2, sticky="ew", padx=0, pady=0)
+        self._planilha_anexos_host.grid(row=0, column=3, sticky="ew", padx=0, pady=0)
         self._planilha_anexos_host.grid_columnconfigure(0, weight=1)
         self._planilha_caminho_cache = ""
         self._planilha_prontuarios_cache = ""
@@ -961,7 +984,41 @@ class ApacBotApp(ctk.CTk):
         self._rebuild_planilha_anexos()
 
         self._apply_clinicas_for_sistema("biodata")
+        self._update_icare_planilha_visibility()
         return row + 1
+
+    def _sistema_atual_key(self) -> str:
+        return normalizar_sistema_origem(self.opt_sistema.get())
+
+    def _is_eyecare_mode(self) -> bool:
+        if self._sistema_atual_key() == "eyecare":
+            return True
+        clinica = self.opt_clinica.get().strip()
+        return clinica == "IMO"
+
+    def _is_icare_mode(self) -> bool:
+        return self._is_eyecare_mode()
+
+    def _update_icare_planilha_visibility(self) -> None:
+        col = getattr(self, "_col_planilha_pacientes", None)
+        if col is None:
+            return
+        if self._is_icare_mode():
+            col.grid()
+            cached = getattr(self, "_planilha_pacientes_cache", "") or ""
+            entry = self._entries.get("planilha_pacientes_caminho")
+            if entry is not None and cached and not entry.get().strip():
+                entry.delete(0, "end")
+                entry.insert(0, cached)
+        else:
+            entry = self._entries.get("planilha_pacientes_caminho")
+            if entry is not None:
+                try:
+                    self._planilha_pacientes_cache = entry.get().strip()
+                except Exception:
+                    pass
+            col.grid_remove()
+        self._rebuild_planilha_anexos()
 
     def _cache_planilha_anexos_from_entries(self) -> None:
         entry = self._entries.get("planilha_caminho")
@@ -1097,12 +1154,20 @@ class ApacBotApp(ctk.CTk):
             self.opt_aba_glaucoma.set("—")
             self.opt_aba_glaucoma.configure(state="disabled")
         else:
+            icare = self._is_icare_mode()
             host.grid_columnconfigure(0, weight=1)
-            host.grid_columnconfigure(1, weight=1)
+            host.grid_columnconfigure(1, weight=1 if not icare else 0)
             col_planilha = ctk.CTkFrame(host, fg_color="transparent")
-            col_planilha.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=0)
+            col_planilha.grid(
+                row=0, column=0, sticky="ew", padx=(0, 10) if not icare else 0, pady=0
+            )
             col_planilha.grid_columnconfigure(0, weight=1)
-            theme.style_field_label(col_planilha, "Planilha (.xlsx)").grid(
+            rotulo_planilha = (
+                "Planilha lista APAC IMO (.xlsx)"
+                if icare
+                else "Planilha (.xlsx)"
+            )
+            theme.style_field_label(col_planilha, rotulo_planilha).grid(
                 row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2)
             )
             entry = theme.style_entry(col_planilha)
@@ -1112,21 +1177,22 @@ class ApacBotApp(ctk.CTk):
                 col_planilha, "Browse…", width=90, command=self._browse_planilha
             ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
 
-            col_pront = ctk.CTkFrame(host, fg_color="transparent")
-            col_pront.grid(row=0, column=1, sticky="ew", padx=0, pady=0)
-            col_pront.grid_columnconfigure(0, weight=1)
-            theme.style_field_label(
-                col_pront, "Planilha prontuários (.xlsx)"
-            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2))
-            entry_pront = theme.style_entry(col_pront)
-            entry_pront.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=0)
-            self._entries["planilha_prontuarios_caminho"] = entry_pront
-            theme.btn_secondary(
-                col_pront,
-                "Browse…",
-                width=90,
-                command=self._browse_planilha_prontuarios,
-            ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
+            if not icare:
+                col_pront = ctk.CTkFrame(host, fg_color="transparent")
+                col_pront.grid(row=0, column=1, sticky="ew", padx=0, pady=0)
+                col_pront.grid_columnconfigure(0, weight=1)
+                theme.style_field_label(
+                    col_pront, "Planilha prontuários (.xlsx)"
+                ).grid(row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 2))
+                entry_pront = theme.style_entry(col_pront)
+                entry_pront.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=0)
+                self._entries["planilha_prontuarios_caminho"] = entry_pront
+                theme.btn_secondary(
+                    col_pront,
+                    "Browse…",
+                    width=90,
+                    command=self._browse_planilha_prontuarios,
+                ).grid(row=1, column=1, sticky="e", padx=0, pady=0)
 
         caminho = getattr(self, "_planilha_caminho_cache", "") or ""
         if caminho:
@@ -1146,20 +1212,21 @@ class ApacBotApp(ctk.CTk):
 
     def _apply_clinicas_for_sistema(self, sistema: str) -> None:
         key = normalizar_sistema_origem(sistema)
-        clinicas = list(CLINICAS_POR_SISTEMA.get(key) or ())
-        if not clinicas:
-            self.opt_clinica.configure(values=["—"], state="disabled")
-            self.opt_clinica.set("—")
-            self._apply_cnes_for_clinica("")
-            return
-        self.opt_clinica.configure(values=clinicas, state="normal")
-        if key == "biodata" or len(clinicas) == 1:
-            self.opt_clinica.set(clinicas[0])
-            self.opt_clinica.configure(state="disabled")
-        else:
-            atual = self.opt_clinica.get()
-            self.opt_clinica.set(atual if atual in clinicas else clinicas[0])
+        padrao = CLINICA_PADRAO_POR_SISTEMA.get(key, "")
+        self.opt_clinica.configure(values=list(CLINICAS_UI), state="normal")
+        atual = self.opt_clinica.get().strip()
+        if atual in CLINICAS_UI:
+            esperado = CLINICA_PADRAO_POR_SISTEMA.get(
+                SISTEMA_POR_CLINICA.get(atual, ""), ""
+            )
+            if SISTEMA_POR_CLINICA.get(atual) == key and esperado:
+                self.opt_clinica.set(atual)
+            elif padrao:
+                self.opt_clinica.set(padrao)
+        elif padrao:
+            self.opt_clinica.set(padrao)
         self._apply_cnes_for_clinica(self.opt_clinica.get())
+        self._update_icare_planilha_visibility()
 
     def _apply_cnes_for_clinica(self, clinica_id: str) -> None:
         cid = "" if clinica_id.strip() == "—" else clinica_id
@@ -1174,10 +1241,29 @@ class ApacBotApp(ctk.CTk):
             entry.insert(0, defaults[key])
 
     def _on_sistema_changed(self, choice: str) -> None:
-        self._apply_clinicas_for_sistema(choice)
+        if self._syncing_sistema_clinica:
+            return
+        self._syncing_sistema_clinica = True
+        try:
+            self._apply_clinicas_for_sistema(choice)
+        finally:
+            self._syncing_sistema_clinica = False
 
     def _on_clinica_changed(self, choice: str) -> None:
-        self._apply_cnes_for_clinica(choice)
+        if self._syncing_sistema_clinica:
+            return
+        cid = (choice or "").strip()
+        self._apply_cnes_for_clinica(cid)
+        sistema = SISTEMA_POR_CLINICA.get(cid)
+        if sistema:
+            label = sistema_ui_label(sistema)
+            if self.opt_sistema.get() != label:
+                self._syncing_sistema_clinica = True
+                try:
+                    self.opt_sistema.set(label)
+                finally:
+                    self._syncing_sistema_clinica = False
+        self._update_icare_planilha_visibility()
 
     def _append_log(self, text: str) -> None:
         self._log_buffer.append(text)
@@ -1206,7 +1292,7 @@ class ApacBotApp(ctk.CTk):
         win.present()
 
     def _show_relatorio(self) -> None:
-        snap = load_lote_snapshot(self._resolve_config_path())
+        snap = self._load_lote_snapshot_from_ui()
         self._last_lote_snap = snap
         win = self._relatorio_win
         if win is not None and win.is_open:
@@ -1251,7 +1337,7 @@ class ApacBotApp(ctk.CTk):
         ) else self
 
         try:
-            cfg = load_config(self._resolve_config_path())
+            cfg = self._cfg_overlay_ui(load_config(self._resolve_config_path()))
         except (ConfigError, OSError) as exc:
             messagebox.showerror("Exportar para cliente", str(exc), parent=parent)
             return
@@ -1265,10 +1351,6 @@ class ApacBotApp(ctk.CTk):
                 parent=parent,
             )
             return
-
-        planilha = self._ui_planilha_path()
-        if planilha is not None:
-            cfg = cfg.with_planilha(planilha)
 
         self._export_cliente_busy = True
         if self._relatorio_win is not None and self._relatorio_win.is_open:
@@ -1402,12 +1484,21 @@ class ApacBotApp(ctk.CTk):
             texto = texto.strip()
         return texto
 
-    def _cfg_para_reset_lote(self) -> AppConfig:
-        cfg = load_config(self._resolve_config_path())
+    def _cfg_overlay_ui(self, cfg: AppConfig) -> AppConfig:
+        """Aplica Sistema/Clínica/planilha do formulário sem gravar no JSON."""
         texto = self._planilha_path_texto_ui()
         if texto:
             cfg = cfg.with_planilha(texto)
-        return cfg
+        clinica_ui = self.opt_clinica.get().strip()
+        if clinica_ui == "—":
+            clinica_ui = ""
+        return cfg.with_origem_clinica(
+            sistema_origem=self._sistema_atual_key(),
+            clinica_id=clinica_ui or None,
+        )
+
+    def _cfg_para_reset_lote(self) -> AppConfig:
+        return self._cfg_overlay_ui(load_config(self._resolve_config_path()))
 
     def _reset_lote_operacional_se_necessario(self, *, nova_sessao: bool = False) -> None:
         if self._job_running:
@@ -1453,6 +1544,33 @@ class ApacBotApp(ctk.CTk):
             return None
         return path
 
+    def _load_lote_snapshot_from_ui(
+        self,
+        *,
+        planilha_override: Optional[Path] = None,
+        aba_glaucoma_override: Optional[str] = None,
+    ) -> LoteSnapshot:
+        override = planilha_override
+        if override is None:
+            override = self._ui_planilha_path()
+        elif not override.is_file():
+            override = None
+        if override is None:
+            return snapshot_sem_planilha()
+        aba = aba_glaucoma_override
+        if aba is None and self._modalidade == MODALIDADE_GLAUCOMA:
+            aba = self._current_aba_glaucoma() or None
+        clinica_ui = self.opt_clinica.get().strip()
+        if clinica_ui == "—":
+            clinica_ui = ""
+        return load_lote_snapshot(
+            self._resolve_config_path(),
+            planilha_override=override,
+            aba_glaucoma_override=aba,
+            sistema_origem_override=self._sistema_atual_key(),
+            clinica_id_override=clinica_ui or None,
+        )
+
     def _refresh_lote_panel(
         self,
         *,
@@ -1462,22 +1580,9 @@ class ApacBotApp(ctk.CTk):
         panel = self._lote_panel
         if panel is None:
             return None
-        override = planilha_override
-        if override is None:
-            override = self._ui_planilha_path()
-        elif not override.is_file():
-            override = None
-        if override is None:
-            snap = snapshot_sem_planilha()
-            panel.apply_snapshot(snap)
-            return snap
-        aba = aba_glaucoma_override
-        if aba is None and self._modalidade == MODALIDADE_GLAUCOMA:
-            aba = self._current_aba_glaucoma() or None
-        snap = load_lote_snapshot(
-            self._resolve_config_path(),
-            planilha_override=override,
-            aba_glaucoma_override=aba,
+        snap = self._load_lote_snapshot_from_ui(
+            planilha_override=planilha_override,
+            aba_glaucoma_override=aba_glaucoma_override,
         )
         panel.apply_snapshot(snap)
         self._last_lote_snap = snap
@@ -1530,11 +1635,17 @@ class ApacBotApp(ctk.CTk):
             prontuarios = entry_pront.get().strip()
         else:
             prontuarios = getattr(self, "_planilha_prontuarios_cache", "") or ""
+        entry_pac = self._entries.get("planilha_pacientes_caminho")
+        if entry_pac is not None:
+            pacientes = entry_pac.get().strip()
+        else:
+            pacientes = getattr(self, "_planilha_pacientes_cache", "") or ""
         return UiFormData(
             sistema_origem=sistema,
             clinica_id=clinica,
             planilha_caminho=planilha,
             planilha_prontuarios_caminho=prontuarios,
+            planilha_pacientes_caminho=pacientes,
             planilha_aba_glaucoma=self._current_aba_glaucoma(),
             paciente_inicio=self._entries["paciente_inicio"].get().strip(),
             modalidade=self._modalidade,
@@ -1546,24 +1657,20 @@ class ApacBotApp(ctk.CTk):
         self.opt_modalidade.set(modalidade_ui_label(self._modalidade))
         self._planilha_caminho_cache = form.planilha_caminho
         self._planilha_prontuarios_cache = form.planilha_prontuarios_caminho
+        self._planilha_pacientes_cache = form.planilha_pacientes_caminho
         self._planilha_aba_glaucoma_cache = form.planilha_aba_glaucoma
         self._rebuild_planilha_anexos()
 
         label = sistema_ui_label(form.sistema_origem)
         self.opt_sistema.set(label)
-        self._apply_clinicas_for_sistema(form.sistema_origem)
-        clinicas = CLINICAS_POR_SISTEMA.get(
-            normalizar_sistema_origem(form.sistema_origem), ()
-        )
-        if form.clinica_id and form.clinica_id in clinicas:
-            # Reabilita só para setar valor se estava disabled
-            self.opt_clinica.configure(state="normal")
+        if form.clinica_id and form.clinica_id in CLINICAS_UI:
             self.opt_clinica.set(form.clinica_id)
-            if (
-                normalizar_sistema_origem(form.sistema_origem) == "biodata"
-                or len(clinicas) == 1
-            ):
-                self.opt_clinica.configure(state="disabled")
+        self._apply_clinicas_for_sistema(form.sistema_origem)
+        entry_pac = self._entries.get("planilha_pacientes_caminho")
+        if entry_pac is not None and form.planilha_pacientes_caminho:
+            entry_pac.delete(0, "end")
+            entry_pac.insert(0, form.planilha_pacientes_caminho)
+        self._update_icare_planilha_visibility()
 
         entry_pi = self._entries.get("paciente_inicio")
         if entry_pi is not None:
@@ -1581,7 +1688,10 @@ class ApacBotApp(ctk.CTk):
             self._append_log(f"[UI] Erro ao carregar: {exc}\n")
             return
         self._fill_form(form)
-        if secrets_missing(path):
+        if (
+            normalizar_sistema_origem(form.sistema_origem) == "biodata"
+            and secrets_missing(path)
+        ):
             self.lbl_aviso.configure(
                 text=(
                     "Aviso: secrets.local.json ausente ou sem senha — "
@@ -1595,8 +1705,13 @@ class ApacBotApp(ctk.CTk):
         self._refresh_lote_panel()
 
     def _browse_planilha(self) -> None:
+        titulo = (
+            "Selecionar planilha lista APAC IMO"
+            if self._is_icare_mode()
+            else "Selecionar planilha"
+        )
         path = filedialog.askopenfilename(
-            title="Selecionar planilha",
+            title=titulo,
             filetypes=[("Excel", "*.xlsx"), ("Todos", "*.*")],
         )
         if not path:
@@ -1623,6 +1738,19 @@ class ApacBotApp(ctk.CTk):
             ),
         )
 
+    def _browse_planilha_pacientes(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Selecionar planilha de pacientes Eyecare",
+            filetypes=[("Excel", "*.xlsx"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        entry = self._entries.get("planilha_pacientes_caminho")
+        if entry is not None:
+            entry.delete(0, "end")
+            entry.insert(0, path)
+        self._planilha_pacientes_cache = path
+
     def _browse_planilha_prontuarios(self) -> None:
         path = filedialog.askopenfilename(
             title="Selecionar planilha de prontuários",
@@ -1643,7 +1771,7 @@ class ApacBotApp(ctk.CTk):
         self.btn_cancel.configure(state="normal" if running else "disabled")
         if running:
             for btn in (
-                self.btn_open_apac,
+                self.btn_iniciar,
                 self.btn_export_set,
                 getattr(self, "btn_completar_erros", None),
             ):

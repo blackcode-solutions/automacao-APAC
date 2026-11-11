@@ -3,7 +3,7 @@
 ; Pré-requisito: rodar scripts\build_exe.ps1 até o PyInstaller (ou o script completo).
 
 #define MyAppName "SIS DG APAC"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "DG"
 #define MyAppExeName "SIS-DG-APAC.exe"
 

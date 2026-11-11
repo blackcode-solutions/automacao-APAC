@@ -15,6 +15,7 @@ from apac_bot.config import (
     AppConfig,
     ConfigError,
     biodata_modo,
+    load_config,
     validate_config,
 )
 from apac_bot.connectors import build_connector
@@ -155,7 +156,7 @@ def test_biodata_modo_defaults(tmp_path: Path):
 
 def test_validate_api_skips_locators(tmp_path: Path):
     cfg = _cfg(tmp_path, modo="api")
-    avisos = validate_config(cfg, for_biodata_real=True)
+    avisos = validate_config(cfg)
     assert avisos == []
 
 
@@ -175,12 +176,41 @@ def test_validate_biodata_glaucoma_sem_planilha_prontuarios(tmp_path: Path):
     assert avisos == []
 
 
-def test_validate_api_requires_secrets(tmp_path: Path):
+def test_load_config_icare_sem_bloco_portal(tmp_path: Path):
+    """Alias icare e Eyecare sem bloco eyecare/browser no JSON."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "clinica_id": "IMO",
+                "sistema_origem": "icare",
+                "planilha": {
+                    "caminho": str(tmp_path / "apac.xlsx"),
+                    "colunas": {
+                        "PACIENTE": "P",
+                        "COD": "C",
+                        "AUDITOR": "A",
+                        "NUMERACAO": "N",
+                    },
+                },
+                "planilha_pacientes": {"caminho": str(tmp_path / "pac.xlsx")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.sistema_origem == "eyecare"
+    validate_config(cfg)
+
+
+def test_validate_icare_sem_planilha_prontuarios(tmp_path: Path):
     cfg = _cfg(tmp_path, modo="api")
-    (tmp_path / "secrets.local.json").unlink()
-    with pytest.raises(ConfigError) as exc:
-        validate_config(cfg, for_biodata_real=True)
-    assert "secrets.local.json" in str(exc.value)
+    cfg.raw["sistema_origem"] = "icare"
+    cfg.raw["clinica_id"] = "IMO"
+    cfg.raw.pop("planilha_prontuarios", None)
+    cfg.raw["planilha_pacientes"] = {"caminho": str(tmp_path / "pac.xlsx")}
+    avisos = validate_config(cfg)
+    assert avisos == []
 
 
 def test_build_connector_api(tmp_path: Path):

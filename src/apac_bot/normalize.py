@@ -2,8 +2,62 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional
+
+_MESES_NOME: dict[str, int] = {}
+for _num, _mes in enumerate(
+    (
+        "janeiro",
+        "fevereiro",
+        "marco",
+        "abril",
+        "maio",
+        "junho",
+        "julho",
+        "agosto",
+        "setembro",
+        "outubro",
+        "novembro",
+        "dezembro",
+    ),
+    1,
+):
+    _MESES_NOME[_mes] = _num
+for _num, _en in enumerate(
+    (
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ),
+    1,
+):
+    _MESES_NOME[_en] = _num
+# «março» após remoção de acento vira «marco» (já em _MESES_NOME).
+_MESES_NOME["março"] = 3
+_MESES_NOME["mar"] = 3
+_MESES_NOME["sep"] = 9
+_MESES_NOME["oct"] = 10
+_MESES_NOME["nov"] = 11
+_MESES_NOME["dec"] = 12
+
+_RE_MES_DIA_ANO = re.compile(
+    r"^\s*([a-zà-ú]+)\s+(\d{1,2}),?\s+(\d{4})\s*$",
+    re.IGNORECASE,
+)
+_RE_DIA_DE_MES = re.compile(
+    r"^\s*(\d{1,2})\s+de\s+([a-zà-ú]+)\s+de\s+(\d{4})\s*$",
+    re.IGNORECASE,
+)
 
 from apac_bot.tipos_logradouro import tipos_logradouro_por_tamanho
 
@@ -168,6 +222,84 @@ def sexo_para_apac(value: Optional[str]) -> Optional[str]:
     return None
 
 
+_PRIMEIRO_NOME_MIN = 3
+
+# Heurística Eyecare: não substitui cadastro oficial; só preenche quando genero vazio.
+_PRIMEIRO_NOME_FEMININO = frozenset(
+    {
+        "ANA",
+        "BEATRIZ",
+        "HELENA",
+        "JULIA",
+        "LUCIA",
+        "MARIA",
+        "PAULA",
+        "RITA",
+        "SANDRA",
+        "TERESA",
+    }
+)
+_PRIMEIRO_NOME_MASCULINO = frozenset(
+    {
+        "ANTONIO",
+        "CARLOS",
+        "JOAO",
+        "JOSE",
+        "JORGE",
+        "LUIS",
+        "MARCOS",
+        "MARIO",
+        "PAULO",
+        "PEDRO",
+        "SERGIO",
+    }
+)
+_PRIMEIRO_NOME_AMBIGUO = frozenset(
+    {
+        "ANDRE",
+        "CRIS",
+        "DANIEL",
+        "DARIO",
+        "FABIO",
+        "GABRIEL",
+        "MICHEL",
+        "ROBIN",
+        "SIDNEY",
+    }
+)
+# Nomes masculinos comuns terminados em A (evita classificar como F).
+_PRIMEIRO_NOME_MASC_TERMINA_A = frozenset({"JOSUA", "JOSHUA", "LUCA", "NICOLA"})
+
+
+def inferir_sexo_por_nome(nome: Optional[str]) -> Optional[str]:
+    """
+    Infere M/F pelo primeiro nome (heurística PT-BR).
+    Retorna None se incerto — não inventa sexo.
+    """
+    bruto = " ".join(str(nome or "").split())
+    if not bruto:
+        return None
+    primeiro = bruto.split()[0]
+    chave = _sem_acento_upper(primeiro)
+    if len(chave) < _PRIMEIRO_NOME_MIN:
+        return None
+    if chave in _PRIMEIRO_NOME_AMBIGUO:
+        return None
+    if chave in _PRIMEIRO_NOME_FEMININO:
+        return "F"
+    if chave in _PRIMEIRO_NOME_MASCULINO:
+        return "M"
+    if chave in _PRIMEIRO_NOME_MASC_TERMINA_A:
+        return "M"
+    if chave.endswith("OS") and len(chave) >= _PRIMEIRO_NOME_MIN:
+        return "M"
+    if chave.endswith("O") and len(chave) >= _PRIMEIRO_NOME_MIN:
+        return "M"
+    if chave.endswith("A") and len(chave) >= _PRIMEIRO_NOME_MIN:
+        return "F"
+    return None
+
+
 def nascimento_ddmmaaaa(value: Optional[str]) -> Optional[str]:
     """Converte data da origem para DDMMAAAA (máscara APAC sem barras)."""
     if not value:
@@ -199,6 +331,70 @@ def nascimento_ddmmaaaa(value: Optional[str]) -> Optional[str]:
     if ymd_valido(y2, m2, d2):
         return f"{digits[6:8]}{digits[4:6]}{digits[0:4]}"
     return None
+
+
+def _mes_numero_por_nome(nome: str) -> Optional[int]:
+    chave = _sem_acento(nome.casefold().strip())
+    if not chave:
+        return None
+    if chave in _MESES_NOME:
+        return _MESES_NOME[chave]
+    for token, num in _MESES_NOME.items():
+        if len(token) >= 3 and (chave == token or chave.startswith(token)):
+            return num
+    return None
+
+
+def _nascimento_texto_mes_extenso(texto: str) -> Optional[str]:
+    s = str(texto).strip()
+    if not s:
+        return None
+    m = _RE_MES_DIA_ANO.match(s)
+    if m:
+        mes = _mes_numero_por_nome(m.group(1))
+        dia = int(m.group(2))
+        ano = int(m.group(3))
+        if mes and ymd_valido(ano, mes, dia):
+            return f"{dia:02d}{mes:02d}{ano:04d}"
+    m = _RE_DIA_DE_MES.match(s)
+    if m:
+        dia = int(m.group(1))
+        mes = _mes_numero_por_nome(m.group(2))
+        ano = int(m.group(3))
+        if mes and ymd_valido(ano, mes, dia):
+            return f"{dia:02d}{mes:02d}{ano:04d}"
+    return None
+
+
+def _sem_acento(texto: str) -> str:
+    t = unicodedata.normalize("NFKD", texto or "")
+    return "".join(ch for ch in t if not unicodedata.combining(ch))
+
+
+def normalizar_nascimento_origem(valor: Any) -> Optional[str]:
+    """
+    Converte nascimento de planilha (texto PT/EN, datetime Excel) para DDMMAAAA.
+    Usado na borda ICARE; não altera leitura BIODATA.
+    """
+    if valor is None:
+        return None
+    if isinstance(valor, datetime):
+        valor = valor.date()
+    if isinstance(valor, date):
+        if not ymd_valido(valor.year, valor.month, valor.day):
+            return None
+        return f"{valor.day:02d}{valor.month:02d}{valor.year:04d}"
+    texto = cell_as_text(valor)
+    if not texto:
+        return None
+    dd = nascimento_ddmmaaaa(texto)
+    if dd:
+        return dd
+    iso = texto.split()[0] if " " in texto and "-" in texto else texto
+    dd = nascimento_ddmmaaaa(iso)
+    if dd:
+        return dd
+    return _nascimento_texto_mes_extenso(texto)
 
 
 def _sem_acento_upper(texto: str) -> str:

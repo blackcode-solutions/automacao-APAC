@@ -542,3 +542,33 @@ def test_resolver_aba_lancamentos_unitario(tmp_path: Path):
         == "PRODUÇÃO APAC OUTUBRO 2026"
     )
     wb2.close()
+
+
+def test_load_lancamentos_icare_rejeita_planilha_pacientes_no_campo_lista(
+    tmp_path: Path,
+):
+    xlsx = tmp_path / "pacientes.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        [
+            "prontuários",
+            "paciente",
+            "cpf",
+            "data nascimento",
+            "genero",
+        ]
+    )
+    ws.append(["1", "MARIA", "529.982.247-25", "01/01/1980", "F"])
+    wb.save(xlsx)
+    wb.close()
+
+    raw = json.loads(Path("config.example.json").read_text(encoding="utf-8"))
+    raw["sistema_origem"] = "icare"
+    raw["clinica_id"] = "IMO"
+    raw["planilha"]["caminho"] = str(xlsx)
+    raw["planilha_pacientes"] = {"caminho": str(tmp_path / "outro.xlsx")}
+    cfg = AppConfig(raw=raw, path=tmp_path / "config.json")
+    result = load_lancamentos(cfg)
+    assert not result.ok
+    assert any("obrigatórias ausentes" in e or "PRONT" in e for e in result.erros)

@@ -131,18 +131,39 @@ CNS_KEYS = frozenset(
 )
 
 # Catálogo UI (ampliar à mão quando houver novos sistemas/clínicas).
-SISTEMAS_UI: tuple[str, ...] = ("BIODATA", "SISAC")
+SISTEMAS_UI: tuple[str, ...] = ("BIODATA", "EYECARE", "SISAC")
 CLINICAS_POR_SISTEMA: dict[str, tuple[str, ...]] = {
     "biodata": ("oftalmocentro91",),
+    "eyecare": ("IMO",),
     "sisac": (),
 }
 SISTEMAS_ORIGEM_VALIDOS = frozenset(CLINICAS_POR_SISTEMA.keys())
+
+CLINICA_PADRAO_POR_SISTEMA: dict[str, str] = {
+    "biodata": "oftalmocentro91",
+    "eyecare": "IMO",
+}
+
+SISTEMA_POR_CLINICA: dict[str, str] = {
+    "oftalmocentro91": "biodata",
+    "IMO": "eyecare",
+}
+
+CLINICAS_UI: tuple[str, ...] = tuple(
+    cid
+    for sistema in ("biodata", "eyecare")
+    for cid in (CLINICAS_POR_SISTEMA.get(sistema) or ())
+)
 
 # Defaults de CNES por clínica (ampliar à mão).
 CNES_POR_CLINICA: dict[str, dict[str, str]] = {
     "oftalmocentro91": {
         "cnes_solicitante": "6618839",
         "cnes_executante": "6618839",
+    },
+    "IMO": {
+        "cnes_solicitante": "9398392",
+        "cnes_executante": "9398392",
     },
 }
 
@@ -161,9 +182,28 @@ PLANILHA_PRONTUARIOS_DEFAULTS: dict[str, Any] = {
     },
 }
 
+PLANILHA_PACIENTES_DEFAULTS: dict[str, Any] = {
+    "linha_cabecalho": 1,
+    "colunas": {
+        "PRONTUARIO": "prontuários",
+        "PACIENTE": "paciente",
+        "CPF": "cpf",
+        "NASCIMENTO": "data_nascimento",
+        "GENERO": "genero",
+        "CEP": "cep",
+        "ENDERECO": "endereço",
+        "NUMERO": "numero",
+        "COMPLEMENTO": "complemento",
+        "BAIRRO": "bairro",
+        "NOME_MAE": "nome da mae",
+    },
+}
 
 def normalizar_sistema_origem(valor: str) -> str:
-    return str(valor or "").strip().lower()
+    key = str(valor or "").strip().lower()
+    if key == "icare":
+        return "eyecare"
+    return key
 
 
 def normalizar_modalidade(valor: str) -> str:
@@ -227,6 +267,7 @@ class UiFormData:
     clinica_id: str = ""
     planilha_caminho: str = ""
     planilha_prontuarios_caminho: str = ""
+    planilha_pacientes_caminho: str = ""
     planilha_aba_glaucoma: str = ""
     paciente_inicio: str = ""
     modalidade: str = MODALIDADE_PADRAO
@@ -283,10 +324,19 @@ def form_from_raw(raw: dict[str, Any]) -> UiFormData:
         sistema = "biodata"
     clinica = str(raw.get("clinica_id") or "").strip()
     clinicas = CLINICAS_POR_SISTEMA.get(sistema) or ()
-    if sistema == "biodata" and clinicas:
-        clinica = clinicas[0]
-    elif clinica and clinicas and clinica not in clinicas:
-        clinica = clinicas[0] if len(clinicas) == 1 else ""
+    sistema_por_clinica = SISTEMA_POR_CLINICA.get(clinica)
+    if sistema_por_clinica and sistema_por_clinica != sistema:
+        sistema = sistema_por_clinica
+        clinicas = CLINICAS_POR_SISTEMA.get(sistema) or ()
+    if clinica and clinicas and clinica not in clinicas:
+        clinica = (
+            CLINICA_PADRAO_POR_SISTEMA.get(sistema, "")
+            if len(clinicas) == 1
+            else ""
+        )
+    elif not clinica and clinicas:
+        clinica = CLINICA_PADRAO_POR_SISTEMA.get(sistema, clinicas[0])
+    pacientes = raw.get("planilha_pacientes") or {}
     modalidade = normalizar_modalidade(str(apac.get("modalidade") or ""))
     planilha_caminho = str(planilha.get("caminho") or "").strip()
     # Legado dual: Relatório em planilha_glaucoma → usa como planilha.caminho.
@@ -299,6 +349,7 @@ def form_from_raw(raw: dict[str, Any]) -> UiFormData:
         clinica_id=clinica,
         planilha_caminho=planilha_caminho,
         planilha_prontuarios_caminho=str(prontuarios.get("caminho") or "").strip(),
+        planilha_pacientes_caminho=str(pacientes.get("caminho") or "").strip(),
         planilha_aba_glaucoma=str(planilha.get("aba_glaucoma") or "").strip(),
         paciente_inicio=str(apac.get("paciente_inicio") or "").strip(),
         modalidade=modalidade,
@@ -319,7 +370,7 @@ def validate_form(form: UiFormData) -> list[str]:
     erros: list[str] = []
     sistema = normalizar_sistema_origem(form.sistema_origem)
     if sistema not in SISTEMAS_ORIGEM_VALIDOS:
-        erros.append("Sistema deve ser BIODATA ou SISAC.")
+        erros.append("Sistema deve ser BIODATA, EYECARE ou SISAC.")
     clinicas = CLINICAS_POR_SISTEMA.get(sistema) or ()
     clinica = form.clinica_id.strip()
     if clinicas:
@@ -336,8 +387,14 @@ def validate_form(form: UiFormData) -> list[str]:
     if not form.planilha_caminho.strip():
         erros.append("Caminho da planilha é obrigatório.")
     modalidade = normalizar_modalidade(form.modalidade)
-    if modalidade != MODALIDADE_GLAUCOMA and not form.planilha_prontuarios_caminho.strip():
+    if (
+        modalidade != MODALIDADE_GLAUCOMA
+        and sistema != "eyecare"
+        and not form.planilha_prontuarios_caminho.strip()
+    ):
         erros.append("Caminho da planilha de prontuários é obrigatório.")
+    if sistema == "eyecare" and not form.planilha_pacientes_caminho.strip():
+        erros.append("Caminho da planilha de pacientes é obrigatório para EYECARE.")
 
     fixos = form.dados_fixos_completos()
     for chave in ("cnes_solicitante", "cnes_executante"):
@@ -400,14 +457,51 @@ def merge_form_into_raw(raw: dict[str, Any], form: UiFormData) -> dict[str, Any]
             else:
                 prontuarios.setdefault(key, valor)
     caminho_pront = form.planilha_prontuarios_caminho.strip()
-    # Glaucoma não anexa prontuários — não zerar path do Padrão no JSON.
-    if not (
-        modalidade == MODALIDADE_GLAUCOMA
-        and not caminho_pront
+    # Glaucoma/ICARE: UI sem anexo de prontuários — não zerar path salvo no JSON.
+    preservar_pront_vazio = (
+        not caminho_pront
         and str(prontuarios.get("caminho") or "").strip()
-    ):
+        and (
+            modalidade == MODALIDADE_GLAUCOMA
+            or sistema == "eyecare"
+        )
+    )
+    if not preservar_pront_vazio:
         prontuarios["caminho"] = caminho_pront
     out["planilha_prontuarios"] = prontuarios
+
+    pacientes = dict(out.get("planilha_pacientes") or {})
+    if not pacientes:
+        pacientes = deepcopy(PLANILHA_PACIENTES_DEFAULTS)
+    else:
+        for key, valor in PLANILHA_PACIENTES_DEFAULTS.items():
+            if key == "colunas":
+                cols = dict(pacientes.get("colunas") or {})
+                for ck, cv in valor.items():
+                    cols.setdefault(ck, cv)
+                pacientes["colunas"] = cols
+            else:
+                pacientes.setdefault(key, valor)
+    pacientes["caminho"] = form.planilha_pacientes_caminho.strip()
+    out["planilha_pacientes"] = pacientes
+
+    from apac_bot.icare_faturamento_sheet import (
+        PLANILHA_ICARE_FATURAMENTO_DEFAULTS,
+    )
+
+    icare_fat = dict(out.get("planilha_icare_faturamento") or {})
+    if not icare_fat:
+        icare_fat = deepcopy(PLANILHA_ICARE_FATURAMENTO_DEFAULTS)
+    else:
+        for key, valor in PLANILHA_ICARE_FATURAMENTO_DEFAULTS.items():
+            if key == "colunas":
+                cols = dict(icare_fat.get("colunas") or {})
+                for ck, cv in valor.items():
+                    cols.setdefault(ck, cv)
+                icare_fat["colunas"] = cols
+            else:
+                icare_fat.setdefault(key, valor)
+    out["planilha_icare_faturamento"] = icare_fat
 
     apac = dict(out.get("apac") or {})
     apac["paciente_inicio"] = form.paciente_inicio.strip()

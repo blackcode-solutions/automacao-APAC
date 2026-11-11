@@ -85,6 +85,38 @@
       "CLIENTE": "Cliente"
     }
   },
+  "planilha_icare_faturamento": {
+    "linha_cabecalho": 1,
+    "colunas": {
+      "PRONT": "PRONT",
+      "PACIENTE": "PACIENTES",
+      "COD": "CÓDIGO",
+      "NUMERACAO": "NUMERAÇÃO DE APACS",
+      "ORD": "ORD",
+      "DATA": "DATA",
+      "CNS": "CNS",
+      "PROCEDIMENTO": "PROCEDIMENTO",
+      "TIPO": "TIPO",
+      "MEDICO": "MÉDICO"
+    }
+  },
+  "planilha_pacientes": {
+    "caminho": "",
+    "linha_cabecalho": 1,
+    "colunas": {
+      "PRONTUARIO": "prontuários",
+      "PACIENTE": "paciente",
+      "CPF": "cpf",
+      "NASCIMENTO": "data nascimento",
+      "GENERO": "genero",
+      "CEP": "cep",
+      "ENDERECO": "endereço",
+      "NUMERO": "numero",
+      "COMPLEMENTO": "complemento",
+      "BAIRRO": "bairro",
+      "NOME_MAE": "nome da mae"
+    }
+  },
   "normalizacao": {
     "numeracao": {
       "hifen_para_barra": true,
@@ -131,31 +163,11 @@
     "versao": "Versao 04.01"
   },
   "apac": {
-    "titulo_janela": "APAC MAGNETICO",
-    "caminho_exe": "C:\\APAC\\APAC.exe",
-    "timeout_abrir_s": 30,
-    "permitir_salvar": false,
-    "passos_minimos_para_live": [
-      "foco_janela",
-      "inserir",
-      "numero_apac",
-      "cpf",
-      "enter_apos_cpf"
-    ],
-    "usar_navegacao_inicial": true,
-    "usar_conhost": true,
-    "reiniciar_se_ja_aberto": true,
-    "confirmar_navegacao_inicial": false,
-    "velocidade": "rapido",
-    "intervalo_enter_navegacao_s": 0.8,
     "modalidade": "padrao",
-    "paciente_inicio": "SANDRA MARIA PEREIRA SILVA",
-    "passos": []
+    "paciente_inicio": "SANDRA MARIA PEREIRA SILVA"
   },
   "timeouts": {
-    "biodata_ms": 15000,
-    "apac_pause_s": 0.5,
-    "confirmacao_operador_s": 120
+    "biodata_ms": 15000
   },
   "progresso": {
     "caminho_db": "data/progress.db"
@@ -164,9 +176,5 @@
     "server_url": "",
     "license_key": "20744435-73cc-462d-ab29-059f51afa56d",
     "grace_dias": 14
-  },
-  "diagnostico": {
-    "capturar_tela": false,
-    "pasta_capturas": "capturas"
   }
 }

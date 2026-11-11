@@ -8,13 +8,12 @@ from pathlib import Path
 if __name__ == "__main__" and str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from apac_bot.apac import ApacBlockedError, dump_apac_screen, open_apac_session
 from apac_bot.config import AppConfig, ConfigError, load_config
 from apac_bot.connectors.biodata import BiodataMappingError, open_biodata_session
 from apac_bot.connectors.biodata_api import BiodataApiError
 from apac_bot.license import LicenseError, ensure_license
 from apac_bot.logging_safe import setup_logging
-from apac_bot.pipeline import PipelineError, cmd_fetch, cmd_run, cmd_status
+from apac_bot.pipeline import PipelineError
 from apac_bot.set_pipeline import cmd_gerar_set
 from apac_bot.sheet import SheetError, create_example_workbook
 
@@ -22,13 +21,8 @@ from apac_bot.sheet import SheetError, create_example_workbook
 _LICENSE_GATED = frozenset(
     {
         "validate",
-        "fetch",
-        "run",
-        "status",
         "open-biodata",
-        "open-apac",
         "gerar-set",
-        "dump-apac-screen",
     }
 )
 
@@ -58,38 +52,13 @@ def _add_config_arg(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="apac_bot",
-        description="Automação local APAC + consulta de origem (BIODATA/mock).",
+        description="SIS DG — geração de arquivo SET/OUT + consulta BIODATA.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_val = sub.add_parser("validate", help="Valida configuração e planilha")
     _add_config_arg(p_val)
     p_val.add_argument("--planilha", default=None, help="Override do caminho da planilha")
-
-    p_fetch = sub.add_parser("fetch", help="Consulta origem e registra progresso")
-    _add_config_arg(p_fetch)
-    p_fetch.add_argument("--planilha", default=None)
-    p_fetch.add_argument("--limit", type=int, default=None)
-
-    p_run = sub.add_parser("run", help="Executa fluxo (dry-run por padrão)")
-    _add_config_arg(p_run)
-    p_run.add_argument("--planilha", default=None)
-    p_run.add_argument("--limit", type=int, default=None)
-    mode = p_run.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=True,
-        help="Simula sem digitar no APAC (padrão)",
-    )
-    mode.add_argument(
-        "--live",
-        action="store_true",
-        help="Tenta enviar teclas ao APAC (exige mapeamento completo)",
-    )
-
-    p_status = sub.add_parser("status", help="Mostra resumo do progresso (SQLite)")
-    _add_config_arg(p_status)
 
     p_ex = sub.add_parser(
         "make-example",
@@ -107,17 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_config_arg(p_open)
 
-    p_apac = sub.add_parser(
-        "open-apac",
-        help="Abre o APAC Magnético (APAC.exe) se necessário e foca a janela",
-    )
-    _add_config_arg(p_apac)
-
     p_set = sub.add_parser(
         "gerar-set",
         help=(
-            "Consulta BIODATA e gera arquivo .SET (layout INTERNO) "
-            "sem digitar no APAC; limite via export_set.limite_pacientes"
+            "Consulta BIODATA e gera arquivo .SET (layout INTERNO); "
+            "limite via export_set.limite_pacientes"
         ),
     )
     _add_config_arg(p_set)
@@ -135,15 +98,6 @@ def build_parser() -> argparse.ArgumentParser:
         dest="somente_falhas",
         help="Reprocessa só ERRO/AGUARDANDO_REVISAO e mescla no SET parcial",
     )
-
-    p_dump = sub.add_parser(
-        "dump-apac-screen",
-        help=(
-            "Abre o APAC no conhost (se preciso), le o buffer da tela, "
-            "imprime e salva em capturas/"
-        ),
-    )
-    _add_config_arg(p_dump)
 
     p_ui = sub.add_parser(
         "ui",
@@ -191,23 +145,8 @@ def main(argv: list[str] | None = None) -> int:
             validate_all(cfg, planilha)
             log.info("Validação concluída com sucesso.")
             return 0
-        if args.command == "fetch":
-            return cmd_fetch(cfg, planilha=planilha, limit=args.limit)
-        if args.command == "run":
-            dry_run = not bool(args.live)
-            return cmd_run(
-                cfg,
-                planilha=planilha,
-                limit=args.limit,
-                dry_run=dry_run,
-            )
-        if args.command == "status":
-            return cmd_status(cfg)
         if args.command == "open-biodata":
             open_biodata_session(cfg)
-            return 0
-        if args.command == "open-apac":
-            open_apac_session(cfg)
             return 0
         if args.command == "gerar-set":
             return cmd_gerar_set(
@@ -216,11 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                 limit=args.limit,
                 somente_falhas=bool(getattr(args, "somente_falhas", False)),
             )
-        if args.command == "dump-apac-screen":
-            path = dump_apac_screen(cfg)
-            log.info("Dump concluido: %s", path)
-            return 0
-    except (BiodataMappingError, BiodataApiError, ApacBlockedError) as exc:
+    except (BiodataMappingError, BiodataApiError) as exc:
         log.error("%s", exc)
         return 2
     except (ConfigError, SheetError, PipelineError) as exc:

@@ -96,6 +96,7 @@ def _form_ok(**overrides) -> UiFormData:
             "clinica_id",
             "planilha_caminho",
             "planilha_prontuarios_caminho",
+            "planilha_pacientes_caminho",
             "planilha_aba_glaucoma",
             "paciente_inicio",
             "modalidade",
@@ -225,6 +226,77 @@ def test_cnes_por_clinica_oftalmocentro91():
         "cnes_executante": "6618839",
     }
     assert aplicar_defaults_clinica("desconhecida") == {}
+
+
+def test_cnes_por_clinica_imo():
+    assert aplicar_defaults_clinica("IMO") == {
+        "cnes_solicitante": "9398392",
+        "cnes_executante": "9398392",
+    }
+
+
+def test_form_from_raw_icare_preserva_imo():
+    raw = _base_raw()
+    raw["sistema_origem"] = "icare"
+    raw["clinica_id"] = "IMO"
+    raw["planilha_pacientes"] = {"caminho": "data/pacientes_imo.xlsx"}
+    form = form_from_raw(raw)
+    assert form.sistema_origem == "eyecare"
+    assert form.clinica_id == "IMO"
+    assert form.planilha_pacientes_caminho == "data/pacientes_imo.xlsx"
+
+
+def test_validate_icare_exige_planilha_pacientes():
+    form = _form_ok(
+        sistema_origem="eyecare",
+        clinica_id="IMO",
+        planilha_pacientes_caminho="",
+    )
+    erros = validate_form(form)
+    assert any("pacientes" in e.lower() for e in erros)
+
+
+def test_validate_icare_nao_exige_planilha_prontuarios():
+    form = _form_ok(
+        sistema_origem="eyecare",
+        clinica_id="IMO",
+        planilha_prontuarios_caminho="",
+        planilha_pacientes_caminho="data/pacientes_imo.xlsx",
+    )
+    erros = validate_form(form)
+    assert not any("prontuário" in e.lower() for e in erros)
+
+
+def test_validate_biodata_ainda_exige_planilha_prontuarios():
+    form = _form_ok(planilha_prontuarios_caminho="")
+    erros = validate_form(form)
+    assert any("prontuário" in e.lower() for e in erros)
+
+
+def test_merge_icare_preserva_caminho_prontuarios_no_json():
+    raw = _base_raw()
+    raw["planilha_prontuarios"]["caminho"] = "data/keep_pront.xlsx"
+    form = _form_ok(
+        sistema_origem="eyecare",
+        clinica_id="IMO",
+        planilha_prontuarios_caminho="",
+        planilha_pacientes_caminho="data/pac.xlsx",
+    )
+    merged = merge_form_into_raw(raw, form)
+    assert merged["planilha_prontuarios"]["caminho"] == "data/keep_pront.xlsx"
+
+
+def test_merge_icare_planilha_pacientes():
+    raw = _base_raw()
+    form = _form_ok(
+        sistema_origem="eyecare",
+        clinica_id="IMO",
+        planilha_pacientes_caminho="data/pac.xlsx",
+    )
+    merged = merge_form_into_raw(raw, form)
+    assert merged["sistema_origem"] == "eyecare"
+    assert merged["clinica_id"] == "IMO"
+    assert merged["planilha_pacientes"]["caminho"] == "data/pac.xlsx"
 
 
 def test_form_from_raw():

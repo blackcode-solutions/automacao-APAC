@@ -5,14 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "apac-bot"
 version = "0.1.0"
-description = "Automação local Windows para consulta de origem e lançamento APAC"
+description = "SIS DG — geração local de arquivo SET/OUT APAC (Windows)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "playwright>=1.40.0",
-  "PyAutoGUI>=0.9.54",
   "openpyxl>=3.1.2",
-  "pygetwindow>=0.0.9",
   "customtkinter>=5.2.0",
   "Pillow>=10.0.0",
   "fpdf2>=2.8.0",

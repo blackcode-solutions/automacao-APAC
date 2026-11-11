@@ -26,6 +26,18 @@ REQUIRED_BIODATA_NAV = (
 
 REQUIRED_COLUMN_KEYS = ("PACIENTE", "COD", "AUDITOR", "NUMERACAO")
 
+# Clínica IMO / fluxo Eyecare (isolado do BIODATA oftalmocentro91).
+CLINICA_ID_IMO = "IMO"
+SISTEMA_ORIGEM_EYECARE = "eyecare"
+SISTEMA_ORIGEM_ICARE = "icare"  # alias legado → eyecare
+
+def sistema_origem_canonical(origem: str) -> str:
+    key = str(origem or "").strip().lower()
+    if key == SISTEMA_ORIGEM_ICARE:
+        return SISTEMA_ORIGEM_EYECARE
+    return key
+
+
 # Modalidade do fluxo APAC (apac.modalidade). Distinto de dados_fixos.tipo_apac.
 MODALIDADE_PADRAO = "padrao"
 MODALIDADE_GLAUCOMA = "glaucoma"
@@ -73,7 +85,11 @@ class AppConfig:
 
     @property
     def sistema_origem(self) -> str:
-        return str(self.raw.get("sistema_origem", "mock")).lower()
+        return sistema_origem_canonical(self.raw.get("sistema_origem", "mock"))
+
+    @property
+    def eyecare(self) -> dict[str, Any]:
+        return dict(self.raw.get("eyecare") or {})
 
     @property
     def planilha_caminho(self) -> Path:
@@ -121,6 +137,16 @@ class AppConfig:
         return dict(self.raw.get("planilha_prontuarios") or {})
 
     @property
+    def planilha_pacientes(self) -> dict[str, Any]:
+        """Planilha de cadastro de pacientes (origem ICARE)."""
+        return dict(self.raw.get("planilha_pacientes") or {})
+
+    @property
+    def planilha_icare_faturamento(self) -> dict[str, Any]:
+        """Mapeamento de colunas da planilha de faturamento IMO (lista APAC)."""
+        return dict(self.raw.get("planilha_icare_faturamento") or {})
+
+    @property
     def normalizacao(self) -> dict[str, Any]:
         return dict(self.raw.get("normalizacao") or {})
 
@@ -155,10 +181,6 @@ class AppConfig:
         """Bloco de licença online (server_url, license_key, grace_dias)."""
         return dict(self.raw.get("licenca") or {})
 
-    @property
-    def diagnostico(self) -> dict[str, Any]:
-        return dict(self.raw.get("diagnostico") or {})
-
     def with_planilha(self, caminho: str | Path) -> "AppConfig":
         novo = dict(self.raw)
         planilha = dict(novo.get("planilha") or {})
@@ -173,6 +195,30 @@ class AppConfig:
         novo["planilha"] = planilha
         return AppConfig(raw=novo, path=self.path)
 
+    def with_origem_clinica(
+        self,
+        *,
+        sistema_origem: Optional[str] = None,
+        clinica_id: Optional[str] = None,
+    ) -> "AppConfig":
+        """Overlay da UI (valores ainda não gravados no JSON)."""
+        novo = dict(self.raw)
+        if sistema_origem is not None:
+            novo["sistema_origem"] = str(sistema_origem).strip().lower()
+        if clinica_id is not None:
+            novo["clinica_id"] = str(clinica_id).strip()
+        return AppConfig(raw=novo, path=self.path)
+
+
+def _canonicalize_sistema_origem_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normaliza alias legado icare → eyecare ao carregar JSON."""
+    origem = str(raw.get("sistema_origem") or "").strip().lower()
+    if origem != SISTEMA_ORIGEM_ICARE:
+        return raw
+    novo = dict(raw)
+    novo["sistema_origem"] = SISTEMA_ORIGEM_EYECARE
+    return novo
+
 
 def load_config(path: str | Path) -> AppConfig:
     p = Path(path)
@@ -182,8 +228,9 @@ def load_config(path: str | Path) -> AppConfig:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ConfigError(f"JSON inválido em {p}: {exc}") from exc
+    raw = _canonicalize_sistema_origem_raw(raw)
     cfg = AppConfig(raw=raw, path=p)
-    validate_config(cfg, for_live=False, for_biodata_real=False)
+    validate_config(cfg)
     return cfg
 
 
@@ -202,12 +249,7 @@ def biodata_modo(cfg: AppConfig) -> str:
     return "browser"
 
 
-def validate_config(
-    cfg: AppConfig,
-    *,
-    for_live: bool = False,
-    for_biodata_real: bool = False,
-) -> list[str]:
+def validate_config(cfg: AppConfig) -> list[str]:
     """Valida configuração. Retorna avisos; levanta ConfigError em erros fatais."""
     erros: list[str] = []
     avisos: list[str] = []
@@ -216,8 +258,11 @@ def validate_config(
         erros.append("clinica_id é obrigatório.")
 
     origem = cfg.sistema_origem
-    if origem not in {"mock", "biodata"}:
-        erros.append("sistema_origem deve ser 'mock' ou 'biodata'.")
+    if origem not in {"mock", "biodata", SISTEMA_ORIGEM_EYECARE}:
+        erros.append(
+            "sistema_origem deve ser 'mock', 'biodata' ou 'eyecare' "
+            "(alias legado: icare)."
+        )
 
     planilha = cfg.raw.get("planilha") or {}
     if not planilha.get("caminho"):
@@ -238,53 +283,13 @@ def validate_config(
                 "sistema_origem=biodata."
             )
 
-    precisa_biodata = for_biodata_real or (origem == "biodata" and for_live)
-    if precisa_biodata:
-        modo = biodata_modo(cfg)
-        if modo == "api":
-            api = cfg.biodata.get("api") or {}
-            if not str(api.get("base_url") or "").strip():
-                erros.append("biodata.api.base_url é obrigatório no modo API.")
-            id_sac = api.get("id_sac")
-            if id_sac is None or str(id_sac).strip() == "":
-                erros.append("biodata.api.id_sac é obrigatório no modo API.")
-            from apac_bot.secrets import SecretsError, load_biodata_credentials
-
-            try:
-                creds = load_biodata_credentials(cfg)
-            except SecretsError as exc:
-                erros.append(f"Credenciais BIODATA inválidas: {exc}")
-            else:
-                if creds is None:
-                    erros.append(
-                        "Modo API exige secrets.local.json com usuario e senha."
-                    )
-        else:
-            missing = biodata_locators_pendentes(cfg)
-            if missing:
-                erros.append(
-                    "Localizadores BIODATA incompletos (consulta real bloqueada): "
-                    + ", ".join(missing)
-                )
-            if not (cfg.biodata.get("url")):
-                erros.append("biodata.url é obrigatório para consulta real.")
-
-    if for_live:
-        apac = cfg.apac
-        passos = apac.get("passos") or []
-        minimos = apac.get("passos_minimos_para_live") or []
-        nomes = {p.get("id") or p.get("acao") for p in passos if isinstance(p, dict)}
-        faltando = [m for m in minimos if m not in nomes]
-        if not passos:
+    if origem == SISTEMA_ORIGEM_EYECARE:
+        pac = cfg.raw.get("planilha_pacientes") or {}
+        if not str(pac.get("caminho") or "").strip():
             erros.append(
-                "apac.passos está vazio — execução live bloqueada até mapear a sequência."
+                "planilha_pacientes.caminho é obrigatório quando "
+                "sistema_origem=eyecare."
             )
-        elif faltando:
-            erros.append(
-                "Passos APAC mínimos ausentes para live: " + ", ".join(faltando)
-            )
-        if not apac.get("titulo_janela"):
-            erros.append("apac.titulo_janela é obrigatório para live.")
 
     if erros:
         raise ConfigError("\n".join(erros))
@@ -304,14 +309,6 @@ def biodata_locators_pendentes(cfg: AppConfig) -> list[str]:
         if val is None or (isinstance(val, str) and not val.strip()):
             pendentes.append(key)
     return pendentes
-
-
-def apac_pronto_para_live(cfg: AppConfig) -> bool:
-    try:
-        validate_config(cfg, for_live=True, for_biodata_real=False)
-        return True
-    except ConfigError:
-        return False
 
 
 def resolve_path(base: Path, maybe_relative: Path) -> Path:

@@ -9,7 +9,14 @@ from typing import Any, Optional
 
 from openpyxl import Workbook, load_workbook
 
-from apac_bot.config import MODALIDADE_GLAUCOMA, AppConfig, config_dir, resolve_path
+from apac_bot.config import (
+    CLINICA_ID_IMO,
+    MODALIDADE_GLAUCOMA,
+    SISTEMA_ORIGEM_EYECARE,
+    AppConfig,
+    config_dir,
+    resolve_path,
+)
 from apac_bot.models import Lancamento
 from apac_bot.normalize import cell_as_text, normalize_codigo, normalize_numeracao, optional_text
 
@@ -513,6 +520,36 @@ def _header_map(ws, header_row: int = 1) -> dict[str, int]:
     return headers
 
 
+def _parece_planilha_pacientes_icare(headers: dict[str, int]) -> bool:
+    """Detecta export ICARE de cadastro anexado por engano no faturamento."""
+    keys = {nome_chave_prontuario(k) for k in headers}
+    if not keys:
+        return False
+    has_paciente = "paciente" in keys
+    has_pront = any(k.startswith("prontuario") for k in keys)
+    has_cpf = "cpf" in keys
+    has_genero = any(k.startswith("genero") for k in keys)
+    lacks_apac = not any(
+        k in keys or any(x.startswith(k) for x in keys)
+        for k in ("cod", "auditor", "numeracao")
+    )
+    return lacks_apac and has_cpf and has_genero and (has_paciente or has_pront)
+
+
+def _parece_planilha_faturamento_icare(headers: dict[str, int]) -> bool:
+    """Lista APAC IMO: PRONT + PACIENTES, sem coluna AUDITOR (formato BIODATA)."""
+    keys = {nome_chave_prontuario(k) for k in headers}
+    if not keys:
+        return False
+    if "auditor" in keys:
+        return False
+    has_pront = "pront" in keys or any(k.startswith("prontuario") for k in keys)
+    has_pacientes = "pacientes" in keys
+    has_cod = "codigo" in keys or "cod" in keys
+    has_num = any(k.startswith("numeracao") for k in keys)
+    return has_pront and has_pacientes and has_cod and has_num
+
+
 def _cell(ws, row: int, col: Optional[int]) -> str:
     if col is None:
         return ""
@@ -924,6 +961,18 @@ def _load_lancamentos_glaucoma(
         wb.close()
 
 
+def _usa_planilha_faturamento_icare(cfg: AppConfig) -> bool:
+    """
+    Leitor lista APAC IMO — apenas Sistema ICARE ou clínica IMO.
+    oftalmocentro91 / BIODATA sempre usa o bloco «planilha» abaixo.
+    """
+    if cfg.modalidade == MODALIDADE_GLAUCOMA:
+        return False
+    if cfg.sistema_origem == SISTEMA_ORIGEM_EYECARE:
+        return True
+    return str(cfg.clinica_id or "").strip() == CLINICA_ID_IMO
+
+
 def load_lancamentos(
     cfg: AppConfig, planilha_override: Optional[Path] = None
 ) -> SheetValidation:
@@ -934,6 +983,11 @@ def load_lancamentos(
     caminho = planilha_override or resolve_path(base, cfg.planilha_caminho)
     if not caminho.is_file():
         raise SheetError(f"Planilha não encontrada: {caminho}")
+
+    if _usa_planilha_faturamento_icare(cfg):
+        from apac_bot.icare_faturamento_sheet import load_lancamentos_icare
+
+        return load_lancamentos_icare(cfg, planilha_override)
 
     apenas_ativos = cfg.planilha_apenas_ativos
     # read_only=True não expõe bem row_dimensions.hidden; use modo normal com apenas_ativos
@@ -978,6 +1032,20 @@ def load_lancamentos(
                 )
 
     if erros:
+        if _parece_planilha_faturamento_icare(headers):
+            erros.append(
+                "Esta planilha parece ser a lista APAC IMO. "
+                "Selecione Sistema EYECARE e Clínica IMO e clique em «Salvar»."
+            )
+        elif (
+            cfg.sistema_origem == SISTEMA_ORIGEM_EYECARE
+            and _parece_planilha_pacientes_icare(headers)
+        ):
+            erros.append(
+                "Este arquivo parece ser a planilha de pacientes Eyecare. "
+                "Anexe-o em «Planilha pacientes»; neste campo use a "
+                "planilha lista APAC IMO (PRONT, PACIENTES, CÓDIGO, NUMERAÇÃO DE APACS)."
+            )
         wb.close()
         return SheetValidation([], erros, avisos)
 

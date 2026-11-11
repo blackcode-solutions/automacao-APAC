@@ -293,6 +293,8 @@ def load_lote_snapshot(
     *,
     planilha_override: Optional[Path] = None,
     aba_glaucoma_override: Optional[str] = None,
+    sistema_origem_override: Optional[str] = None,
+    clinica_id_override: Optional[str] = None,
 ) -> LoteSnapshot:
     """
     Lê config + planilha + SQLite e devolve snapshot para o painel.
@@ -331,6 +333,11 @@ def load_lote_snapshot(
         cfg = cfg.with_planilha(override)
     if aba_glaucoma_override is not None:
         cfg = cfg.with_aba_glaucoma(aba_glaucoma_override)
+    if sistema_origem_override or clinica_id_override:
+        cfg = cfg.with_origem_clinica(
+            sistema_origem=sistema_origem_override,
+            clinica_id=clinica_id_override,
+        )
 
     try:
         fila = _fila_para_painel(cfg, override)

@@ -31,10 +31,6 @@ Se a automação BIODATA falhar ao abrir o browser, defina a variável de
 ambiente PLAYWRIGHT_BROWSERS_PATH para a pasta onde o Chromium foi
 instalado (saída típica de `playwright install chromium`).
 
-APAC Magnético
---------------
-Instale o APAC.exe e aponte apac.caminho_exe no config.json.
-
 Executar
 --------
 Menu Iniciar / atalho / SIS-DG-APAC.exe (abre a UI).

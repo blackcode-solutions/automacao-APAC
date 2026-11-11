@@ -24,6 +24,7 @@ from apac_bot.config import (
 from apac_bot.connectors import build_connector
 from apac_bot.connectors.biodata import BiodataMappingError
 from apac_bot.connectors.biodata_api import BiodataApiError
+from apac_bot.icare_pacientes import IcareSheetError
 from apac_bot.logging_safe import setup_logging, short_id
 from apac_bot.models import EstadoLancamento, Lancamento, PacienteDados
 from apac_bot.normalize import (
@@ -567,7 +568,7 @@ def cmd_gerar_set(
 
     try:
         connector = build_connector(cfg.sistema_origem, cfg)
-    except (BiodataMappingError, BiodataApiError) as exc:
+    except (BiodataMappingError, BiodataApiError, IcareSheetError) as exc:
         log.error("[gerar-set] %s", exc)
         return 2
 
@@ -613,7 +614,9 @@ def cmd_gerar_set(
         for lanc in fila:
             store.upsert(lanc, EstadoLancamento.EM_PROCESSAMENTO)
             try:
-                paciente, motivo = resolver_paciente(connector, lanc)
+                paciente, motivo = resolver_paciente(
+                    connector, lanc, origem=cfg.sistema_origem
+                )
             except BiodataApiError as exc:
                 store.upsert(
                     lanc,

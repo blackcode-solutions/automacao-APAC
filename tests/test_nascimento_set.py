@@ -6,9 +6,21 @@ from pathlib import Path
 
 from apac_bot.config import MODALIDADE_PADRAO, AppConfig
 from apac_bot.models import Lancamento, PacienteDados
-from apac_bot.normalize import nascimento_ddmmaaaa
+from datetime import date, datetime
+
+from apac_bot.normalize import nascimento_ddmmaaaa, normalizar_nascimento_origem
 from apac_bot.set_layout import nascimento_aaaammdd
 from apac_bot.set_pipeline import montar_record_paciente
+
+
+def test_normalizar_nascimento_janeiro_extenso():
+    assert normalizar_nascimento_origem("janeiro 16, 1950") == "16011950"
+    assert normalizar_nascimento_origem("16 de janeiro de 1950") == "16011950"
+
+
+def test_normalizar_nascimento_datetime_excel():
+    assert normalizar_nascimento_origem(datetime(1950, 1, 16, 0, 0)) == "16011950"
+    assert normalizar_nascimento_origem(date(1980, 1, 1)) == "01011980"
 
 
 def test_aaaammdd_dia_19_via_ddmmaaaa():
